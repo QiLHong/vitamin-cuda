@@ -1,113 +1,98 @@
-# Relu
+# ReLU：从逐元素加法走向激活函数
 
-## Overview
+[英文原文及完整历史输出](./readme.en.md) · [中文注释源码](./relu.cu) · [中文注释测试](./test.py) · [三种模块对照与冒烟步骤](../../docs/zh-CN/激活函数对比.md)
 
-ReLU kernels.
+## 概述（原文中文化）
 
-- [x] relu — FP32 / FP16
-- [x] relu_fp16x2 — vectorized FP16
-- [x] relu_fp16x8 — vectorized FP16
-- [x] relu_fp16x8_packed — vectorized FP16, packed r/w
-- [x] pytorch op bindings && diff check
+本模块实现 ReLU 激活函数。对普通有限实数，`ReLU(x)=max(0,x)`：负数变成 0，非负数保留。它按元素分别作用，不需要先对整行或整个矩阵求和。
 
-## Run tests
+- [x] `relu`：FP32 / FP16。
+- [x] `relu_fp16x2`：FP16，每线程两个元素。
+- [x] `relu_fp16x8`：FP16，每线程八个元素。
+- [x] `relu_fp16x8_packed`：FP16，八元素打包读写。
+- [x] PyTorch 算子绑定与结果差异检查。
+
+源码补注：实际绑定还有 `relu_fp32x4`，每线程四个 FP32 元素。原 README 未在概述中列出，但原测试已经使用。
+
+## 从一个具体例子理解公式
+
+```text
+输入：[-3, -1, 0, 2, 5]
+输出：[ 0,  0, 0, 2, 5]
+```
+
+这是纸面数学例子，**不要把长度 5 直接用于所有向量化版本**。ReLU 的数学定义适用于任意长度，不代表当前性能代码已实现全部长度的调度和访存保护。
+
+ReLU 与 ReLU6 不同：本模块不会把 7 截断成 6。对于 NaN、无穷值和有符号零，不能只靠普通实数公式推断所有内建函数与框架的细节，需要独立验证。原脚本的随机输入不构成对此类边界的全面测试。
+
+## 阅读这份源码的顺序
+
+先看 `_relu(float)`：用 `fmaxf(0.0f,x)` 实现标量操作。再看 `_relu(half)` 和 `_relu(half2)`：函数重载根据参数类型选择运算；双元素版本使用 `__hmax2`，一条线程里的两个半精度数各自与 0 比较。
+
+然后读 `relu_kernel` 的 FP32/FP16 重载，理解线程索引和访问前的 `idx<N`。接着比较 `fp32x4`、`fp16x2`、`fp16x8`、`fp16x8_packed`。最后看 `binding_func_gen` 和 `PYBIND11_MODULE`，不要一开始就被宏和模板挡住。
+
+## 输入输出约定
+
+`lib.relu(a,b)` 的 a 是输入 CUDA 张量，b 是调用前已经分配好的输出 CUDA 张量。C++ 包装返回 `void`，不是返回一个新张量；计算结果在 b 中。输出显存由 PyTorch 管理，不应手工 `cudaFree`。
+
+需要自行保证 a/b 在同一 CUDA 设备上，当前设备与张量匹配，dtype、元素数和布局匹配，输出足够，且不使用会导致跨线程覆盖的重叠视图。原检查宏只验证每个参数是连续 CUDA 张量，并未完整验证这些关系。分派按照 b 的 dtype 进行，指针重解释不会替你把 a 转成 b 的精度。
+
+本说明的尺寸条件都假设 N 为正，未触及 `int` 或启动配置的范围上限；空张量和超大张量不在当前入门约定内。
+
+## 五个入口的区别与保守尺寸条件
+
+| 入口 | 每线程处理 | 学习时采用的条件 | 需要留意的源码细节 |
+| --- | ---: | --- | --- |
+| `relu` | 1 个 FP32/FP16 | 正整数 N，匹配 dtype | 先判断 `idx<N` 再读写 |
+| `relu_fp32x4` | 4 个 FP32 | N 为 1024 的正整数倍，16 字节对齐 | 源码把 `float4` 读取写在完整组判断之前 |
+| `relu_fp16x2` | 2 个 FP16 | N 为 512 的正整数倍，4 字节对齐 | 核函数没有任何边界判断，多余线程不会自动跳过 |
+| `relu_fp16x8` | 8 个 FP16 | N 为 2048 的正整数倍，4 字节对齐 | 四组 `half2` 预读在判断之前，组起点检查也不能单独保护奇数尾部 |
+| `relu_fp16x8_packed` | 8 个 FP16 | N 为 8 的正整数倍，16 字节对齐 | 核内先检查完整组，再进行宽读取；包装的网格公式仍有限制 |
+
+表中是适合学习的保守约定，不是所有可能安全尺寸的最小条件集，也不是对所有编译器和别名规则的形式化证明。内存访问最终如何生成，需要在真实工具链中查看 PTX/SASS 并测试。
+
+### 重点一：`fp16x2` 和逐元素加法版本不同
+
+这个核只有计算索引和一次 `HALF2` 读写，没有 `if`。即使 N 为偶数，只要块数向上取整后多启动线程，那些线程仍会访问地址。因此，不能把 `elementwise_add_fp16x2` 的条件机械复制过来；这里选择 N 为 `2*256` 的倍数，以避免多余线程。
+
+### 重点二：`packed` 的核内保护不等于完整尾部支持
+
+打包版先检查 `idx+7<N`，再加载 16 字节；否则逐元素检查 `idx+i<N`。这比无条件预读更谨慎。但原包装先做 `N/8` 整数除法，某些尾部根本没有线程负责。
+
+纸面算例：N=2049 时，`N/8=256`，网格公式得到一个 256 线程的块，线程最多负责到下标 2047；下标 2048 没有对应线程。即使每个已启动线程都不越界，也可能漏算结果。这个例子用于读代码，不是建议运行不受支持的输入。
+
+## 运行原测试
+
+下面是 Linux / Bash 命令，在仓库根目录开始：
 
 ```bash
+cd kernels/relu
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+原架构查询选第一张物理 GPU；多卡或可见设备重映射时，应核对它是否等于 PyTorch 当前设备。环境准备、通过 PyTorch 查询计算能力的方法和 FlashInfer 依赖检查见 [逐元素加法运行说明](../elementwise/readme.md)。
 
-```bash
-####################################################################################################
-n: 1024, m: 1024
-torch                          mean time: 0.028208 ms
-relu                           mean time: 0.036064 ms, speedup: 0.78
-relu_fp32x4                    mean time: 0.025104 ms, speedup: 1.12
-torch                          mean time: 0.015424 ms
-relu_half                      mean time: 0.027632 ms, speedup: 0.56
-relu_fp16x2                    mean time: 0.019264 ms, speedup: 0.80
-relu_fp16x8                    mean time: 0.013136 ms, speedup: 1.17
-relu_fp16x8_packed             mean time: 0.013232 ms, speedup: 1.17
-####################################################################################################
-n: 1024, m: 2048
-torch                          mean time: 0.050480 ms
-relu                           mean time: 0.060208 ms, speedup: 0.84
-relu_fp32x4                    mean time: 0.052480 ms, speedup: 0.96
-torch                          mean time: 0.022688 ms
-relu_half                      mean time: 0.048416 ms, speedup: 0.47
-relu_fp16x2                    mean time: 0.033328 ms, speedup: 0.68
-relu_fp16x8                    mean time: 0.023728 ms, speedup: 0.96
-relu_fp16x8_packed             mean time: 0.023472 ms, speedup: 0.97
-####################################################################################################
-n: 1024, m: 4096
-torch                          mean time: 0.101984 ms
-relu                           mean time: 0.114736 ms, speedup: 0.89
-relu_fp32x4                    mean time: 0.102752 ms, speedup: 0.99
-torch                          mean time: 0.049808 ms
-relu_half                      mean time: 0.086016 ms, speedup: 0.58
-relu_fp16x2                    mean time: 0.068144 ms, speedup: 0.73
-relu_fp16x8                    mean time: 0.052464 ms, speedup: 0.95
-relu_fp16x8_packed             mean time: 0.053008 ms, speedup: 0.94
-####################################################################################################
-n: 2048, m: 1024
-torch                          mean time: 0.050016 ms
-relu                           mean time: 0.061392 ms, speedup: 0.81
-relu_fp32x4                    mean time: 0.050944 ms, speedup: 0.98
-torch                          mean time: 0.023600 ms
-relu_half                      mean time: 0.048320 ms, speedup: 0.49
-relu_fp16x2                    mean time: 0.033376 ms, speedup: 0.71
-relu_fp16x8                    mean time: 0.023360 ms, speedup: 1.01
-relu_fp16x8_packed             mean time: 0.023104 ms, speedup: 1.02
-####################################################################################################
-n: 2048, m: 2048
-torch                          mean time: 0.102352 ms
-relu                           mean time: 0.116256 ms, speedup: 0.88
-relu_fp32x4                    mean time: 0.105664 ms, speedup: 0.97
-torch                          mean time: 0.052192 ms
-relu_half                      mean time: 0.093072 ms, speedup: 0.56
-relu_fp16x2                    mean time: 0.061760 ms, speedup: 0.85
-relu_fp16x8                    mean time: 0.052064 ms, speedup: 1.00
-relu_fp16x8_packed             mean time: 0.051744 ms, speedup: 1.01
-####################################################################################################
-n: 2048, m: 4096
-torch                          mean time: 0.206976 ms
-relu                           mean time: 0.225184 ms, speedup: 0.92
-relu_fp32x4                    mean time: 0.204224 ms, speedup: 1.01
-torch                          mean time: 0.102464 ms
-relu_half                      mean time: 0.161728 ms, speedup: 0.63
-relu_fp16x2                    mean time: 0.113680 ms, speedup: 0.90
-relu_fp16x8                    mean time: 0.101888 ms, speedup: 1.01
-relu_fp16x8_packed             mean time: 0.103152 ms, speedup: 0.99
-####################################################################################################
-n: 4096, m: 1024
-torch                          mean time: 0.103168 ms
-relu                           mean time: 0.114448 ms, speedup: 0.90
-relu_fp32x4                    mean time: 0.102240 ms, speedup: 1.01
-torch                          mean time: 0.049008 ms
-relu_half                      mean time: 0.088944 ms, speedup: 0.55
-relu_fp16x2                    mean time: 0.060928 ms, speedup: 0.80
-relu_fp16x8                    mean time: 0.052928 ms, speedup: 0.93
-relu_fp16x8_packed             mean time: 0.052160 ms, speedup: 0.94
-####################################################################################################
-n: 4096, m: 2048
-torch                          mean time: 0.204448 ms
-relu                           mean time: 0.230944 ms, speedup: 0.89
-relu_fp32x4                    mean time: 0.206416 ms, speedup: 0.99
-torch                          mean time: 0.102112 ms
-relu_half                      mean time: 0.180928 ms, speedup: 0.56
-relu_fp16x2                    mean time: 0.120272 ms, speedup: 0.85
-relu_fp16x8                    mean time: 0.103776 ms, speedup: 0.98
-relu_fp16x8_packed             mean time: 0.103568 ms, speedup: 0.99
-####################################################################################################
-n: 4096, m: 4096
-torch                          mean time: 0.406832 ms
-relu                           mean time: 0.415664 ms, speedup: 0.98
-relu_fp32x4                    mean time: 0.401632 ms, speedup: 1.01
-torch                          mean time: 0.205040 ms
-relu_half                      mean time: 0.304336 ms, speedup: 0.67
-relu_fp16x2                    mean time: 0.224896 ms, speedup: 0.91
-relu_fp16x8                    mean time: 0.203856 ms, speedup: 1.01
-relu_fp16x8_packed             mean time: 0.203728 ms, speedup: 1.01
-```
+本脚本需要 PyTorch、NumPy、FlashInfer 计时工具、Ninja 和相匹配的 CUDA/C++ 编译环境。源码包含 `cuda_fp8.h`，不能把根目录的概括性最低版本当作精确编译保证。以 [PyTorch 扩展文档](https://docs.pytorch.org/docs/stable/cpp_extension.html) 与 [FlashInfer 安装说明](https://docs.flashinfer.ai/installation.html)核对依赖。
+
+首次运行会编译 `relu_lib`。它导出的包装将结果写入 b，不应该写成 `b = lib.relu(a,b)` 来取结果。
+
+## 测试脚本做了什么？
+
+原脚本遍历 `n,m ∈ {1024,2048,4096}`，每轮先测 FP32，再转成 FP16。PyTorch 参考使用 `torch.clamp(min=0,out=b)`，通过 `partial` 预先绑定输出，让参考路径也复用输出空间。自定义路径写入另外的 b_my，之后比较两者。
+
+计时使用预热和重复运行，并设置冷 L2 缓存、关闭 CUDA Graph 与 CUPTI 计时路径。统计量是 `np.median(times)`，即中位数，虽然原输出字样是 `mean time`。加速比为参考耗时除以当前耗时，不能脱离输入和环境比较。
+
+FP32 默认检查最大绝对误差 `<1e-5`，FP16 使用 `<1e-3`。运行 Python `-O` 会禁用这些 `assert`。阈值只是该测试的选择，不代表对全部特殊值、设备和切片的正确性保证。
+
+## 原始示例输出
+
+完整历史输出保存在 [英文原文的 Sample output](./readme.en.md#sample-output) 中，未改动数字或英文函数名。它来自原仓库，**不是本次中文化重新测得的性能**。新中文说明没有以编造日志代替 GPU 实测。
+
+小规模统一验证步骤见 [激活函数对照中的冒烟示例](../../docs/zh-CN/激活函数对比.md)。当前工作环境没有 NVIDIA GPU/nvcc，该示例未实际执行。
+
+## 练习与检查点
+
+先在纸上算出输入 `[-2,0,3]` 的输出，再定位三个 `_relu` 重载分别使用哪种内建函数。随后分析为什么 `fp16x2` 的 N=514 不符合整块约定。最后解释：`pack128` 为什么是 16 字节，为什么先检查读取范围仍不能弥补启动配置漏掉的尾部线程。
+
+本模块解释基于 `relu.cu`、`test.py` 与共享的 `pack.cuh`。代码中的限制保持原样，修复应作为独立算法提交，不混入翻译。

@@ -1,113 +1,95 @@
-# Sigmoid
+# Sigmoid：理解非线性计算、半精度与边界
 
-## Overview
+[英文原文及完整历史输出](./readme.en.md) · [中文注释源码](./sigmoid.cu) · [中文注释测试](./test.py) · [模块对照与冒烟步骤](../../docs/zh-CN/激活函数对比.md)
 
-Sigmoid kernels.
+## 概述（原文中文化）
 
-- [x] sigmoid — FP32 / FP16
-- [x] sigmoid_fp16x2 — vectorized FP16
-- [x] sigmoid_fp16x8 — vectorized FP16
-- [x] sigmoid_fp16x8_packed — vectorized FP16, packed r/w
-- [x] pytorch op bindings && diff check
+本模块实现 Sigmoid 激活函数，数学表达为 `σ(x)=1/(1+exp(-x))`，各输入元素独立计算。
 
-## Run tests
+- [x] `sigmoid`：FP32 / FP16。
+- [x] `sigmoid_fp16x2`：FP16，每线程两个元素。
+- [x] `sigmoid_fp16x8`：FP16，每线程八个元素。
+- [x] `sigmoid_fp16x8_packed`：FP16，八元素打包读写。
+- [x] PyTorch 算子绑定与结果差异检查。
+
+源码补注：实际还导出 `sigmoid_fp32x4`，每线程四个 FP32 元素；原概述未列出，但原测试已使用。
+
+## 先理解数学，再看内建函数
+
+`σ(0)=1/2`，较大的正数对应接近 1 的结果，较大的负数对应接近 0 的结果。精确数学中的有限输入结果在 0 和 1 之间，但有限精度计算可能因舍入或中间溢出等原因得到端点。
+
+与 ReLU 的比较取大不同，Sigmoid 包含指数、加法和倒数。一个元素不依赖另一个元素，所以并行分工仍然简单，但数值计算更值得注意。
+
+源码的 FP32 辅助函数先计算 `expf(-x)`，再加 1，然后用 `__frcp_rn` 求倒数。half 版本使用 `__hneg`、`hexp`、`__hadd`、`hrcp`；half2 版本对两个分量分别做同样的步骤。
+
+**半精度路径不是“先按 FP32 算出精确答案，最后转成 half”。** 多个中间步骤都可能舍入；直接计算 `exp(-x)` 也有中间值范围问题。这里保留原直接公式，不把它描述成已针对所有极值验证的稳定实现。
+
+## 代码建议怎么读？
+
+先读三个 `_sigmoid` 重载，逐步把嵌套表达式拆成“取负、指数、加一、倒数”。再读 `sigmoid_kernel` 中的线程索引和访问前边界判断；之后对比宽类型版本的读取位置及每个分支的保护范围。最后看 C++ 宏如何取得张量指针、选择 dtype、启动核函数与注册 Python 绑定。
+
+`half2` 中有两个值并不意味着两个线程同步协作；两组数值是同一个线程处理的两个分量。`pack128` 是存储位模式的不同视图，也不是把 FP16 数值自动转换为 FP32。
+
+## 接口与输入前提
+
+调用形式是 `lib.sigmoid(a,b)`，a 为输入，b 为预分配输出。C++ 包装返回 `void`，结果写入 b。a/b 必须同 CUDA 设备、同 dtype、元素数匹配且连续，输出空间足够，当前设备也要匹配；避免有害的输入输出重叠视图。
+
+原 `CHECK_T` 只验证连续 CUDA 张量，没有验证全部前提。分派根据 b 的 dtype 选择指针类型，不会实际转换 a 的存储。N 被保存在 `int` 中，以下说明仅针对非空且未触及整数/启动上限的输入。
+
+## 各版本的保守学习条件
+
+| 入口 | 处理宽度 | 学习时采用的 N 与对齐条件 | 主要限制 |
+| --- | ---: | --- | --- |
+| `sigmoid` | 1 | 正整数 N，匹配 FP32/FP16 | 访问前检查 `idx<N`，但包装不处理空启动 |
+| `sigmoid_fp32x4` | 4 | N 为 1024 的正整数倍；16 字节对齐 | 源码在判断完整组之前读取 `float4` |
+| `sigmoid_fp16x2` | 2 | N 为 512 的正整数倍；4 字节对齐 | `else` 分支缺少 `idx<N`，多余线程可能访问无效位置 |
+| `sigmoid_fp16x8` | 8 | N 为 2048 的正整数倍；4 字节对齐 | 先预读四组 `half2`，之后才判断写回 |
+| `sigmoid_fp16x8_packed` | 8 | N 为 8 的正整数倍；16 字节对齐 | 核内有读取与标量尾部保护，但原网格计算仍可能漏掉非整组尾部 |
+
+这是源码分析得到的保守入门约定，不是所有合法尺寸的穷举，也不是 GPU 实测结果。特别是宽读取最终如何生成，应在实际工具链中核对。
+
+### 为什么这里的 `else` 不等于完整保护？
+
+原 `sigmoid_fp16x2_kernel` 判断的是 `idx+1<N`。如果条件不成立，就执行单元素的 `b[idx]=_sigmoid(a[idx])`，但没有再次确认 `idx<N`。
+
+纸面例子：N=514，原包装启动两个块，共 512 个线程。每线程两个元素，第 t=257 个线程得到 `idx=514`，完整一对条件不成立，于是进入 `else` 并访问 `a[514]` 与 `b[514]`；合法下标其实只到 513。这说明“处理剩下一个元素”和“跳过所有无效线程”是两件不同的事。该例用于理解限制，不建议直接运行可能非法访问的输入。
+
+### 打包版还需要检查调度
+
+打包版把 `idx+7<N` 放在宽读取之前，尾部分支对每个元素做范围判断。但网格公式先计算 `N/8`，因此 N=2049 等长度仍可能没有线程处理最后一个元素。只证明已启动线程不越界，无法证明整个输出都写过。详见 [模块对比](../../docs/zh-CN/激活函数对比.md)。
+
+## 运行原测试
+
+在仓库根目录开始，使用 Linux / Bash：
 
 ```bash
+cd kernels/sigmoid
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+原命令采用第一张物理 GPU 的计算能力；多 GPU 或可见设备映射环境要核对实际设备。PyTorch 查询方式、编译器与 FlashInfer 环境检查参见 [逐元素加法运行说明](../elementwise/readme.md)。
 
-```bash
-####################################################################################################
-n: 1024, m: 1024
-torch                          mean time: 0.031808 ms
-sigmoid                        mean time: 0.042128 ms, speedup: 0.76
-sigmoid_fp32x4                 mean time: 0.029504 ms, speedup: 1.08
-torch                          mean time: 0.015920 ms
-sigmoid_half                   mean time: 0.032288 ms, speedup: 0.49
-sigmoid_fp16x2                 mean time: 0.019264 ms, speedup: 0.83
-sigmoid_fp16x8                 mean time: 0.015520 ms, speedup: 1.03
-sigmoid_fp16x8_packed          mean time: 0.013184 ms, speedup: 1.21
-####################################################################################################
-n: 1024, m: 2048
-torch                          mean time: 0.051392 ms
-sigmoid                        mean time: 0.062176 ms, speedup: 0.83
-sigmoid_fp32x4                 mean time: 0.051952 ms, speedup: 0.99
-torch                          mean time: 0.023392 ms
-sigmoid_half                   mean time: 0.050784 ms, speedup: 0.46
-sigmoid_fp16x2                 mean time: 0.033888 ms, speedup: 0.69
-sigmoid_fp16x8                 mean time: 0.031984 ms, speedup: 0.73
-sigmoid_fp16x8_packed          mean time: 0.023376 ms, speedup: 1.00
-####################################################################################################
-n: 1024, m: 4096
-torch                          mean time: 0.105568 ms
-sigmoid                        mean time: 0.119664 ms, speedup: 0.88
-sigmoid_fp32x4                 mean time: 0.104672 ms, speedup: 1.01
-torch                          mean time: 0.054496 ms
-sigmoid_half                   mean time: 0.091968 ms, speedup: 0.59
-sigmoid_fp16x2                 mean time: 0.062496 ms, speedup: 0.87
-sigmoid_fp16x8                 mean time: 0.058016 ms, speedup: 0.94
-sigmoid_fp16x8_packed          mean time: 0.050528 ms, speedup: 1.08
-####################################################################################################
-n: 2048, m: 1024
-torch                          mean time: 0.052688 ms
-sigmoid                        mean time: 0.066160 ms, speedup: 0.80
-sigmoid_fp32x4                 mean time: 0.053056 ms, speedup: 0.99
-torch                          mean time: 0.026224 ms
-sigmoid_half                   mean time: 0.058112 ms, speedup: 0.45
-sigmoid_fp16x2                 mean time: 0.040320 ms, speedup: 0.65
-sigmoid_fp16x8                 mean time: 0.037472 ms, speedup: 0.70
-sigmoid_fp16x8_packed          mean time: 0.026208 ms, speedup: 1.00
-####################################################################################################
-n: 2048, m: 2048
-torch                          mean time: 0.103552 ms
-sigmoid                        mean time: 0.133424 ms, speedup: 0.78
-sigmoid_fp32x4                 mean time: 0.104592 ms, speedup: 0.99
-torch                          mean time: 0.052480 ms
-sigmoid_half                   mean time: 0.094240 ms, speedup: 0.56
-sigmoid_fp16x2                 mean time: 0.063520 ms, speedup: 0.83
-sigmoid_fp16x8                 mean time: 0.060448 ms, speedup: 0.87
-sigmoid_fp16x8_packed          mean time: 0.053600 ms, speedup: 0.98
-####################################################################################################
-n: 2048, m: 4096
-torch                          mean time: 0.207664 ms
-sigmoid                        mean time: 0.231360 ms, speedup: 0.90
-sigmoid_fp32x4                 mean time: 0.209184 ms, speedup: 0.99
-torch                          mean time: 0.105920 ms
-sigmoid_half                   mean time: 0.171360 ms, speedup: 0.62
-sigmoid_fp16x2                 mean time: 0.118352 ms, speedup: 0.89
-sigmoid_fp16x8                 mean time: 0.108160 ms, speedup: 0.98
-sigmoid_fp16x8_packed          mean time: 0.104896 ms, speedup: 1.01
-####################################################################################################
-n: 4096, m: 1024
-torch                          mean time: 0.104448 ms
-sigmoid                        mean time: 0.117728 ms, speedup: 0.89
-sigmoid_fp32x4                 mean time: 0.105680 ms, speedup: 0.99
-torch                          mean time: 0.053072 ms
-sigmoid_half                   mean time: 0.094080 ms, speedup: 0.56
-sigmoid_fp16x2                 mean time: 0.062688 ms, speedup: 0.85
-sigmoid_fp16x8                 mean time: 0.059312 ms, speedup: 0.89
-sigmoid_fp16x8_packed          mean time: 0.050944 ms, speedup: 1.04
-####################################################################################################
-n: 4096, m: 2048
-torch                          mean time: 0.205712 ms
-sigmoid                        mean time: 0.240112 ms, speedup: 0.86
-sigmoid_fp32x4                 mean time: 0.208848 ms, speedup: 0.98
-torch                          mean time: 0.105376 ms
-sigmoid_half                   mean time: 0.188224 ms, speedup: 0.56
-sigmoid_fp16x2                 mean time: 0.131136 ms, speedup: 0.80
-sigmoid_fp16x8                 mean time: 0.114288 ms, speedup: 0.92
-sigmoid_fp16x8_packed          mean time: 0.105856 ms, speedup: 1.00
-####################################################################################################
-n: 4096, m: 4096
-torch                          mean time: 0.407056 ms
-sigmoid                        mean time: 0.433024 ms, speedup: 0.94
-sigmoid_fp32x4                 mean time: 0.404896 ms, speedup: 1.01
-torch                          mean time: 0.208928 ms
-sigmoid_half                   mean time: 0.325456 ms, speedup: 0.64
-sigmoid_fp16x2                 mean time: 0.229472 ms, speedup: 0.91
-sigmoid_fp16x8                 mean time: 0.212912 ms, speedup: 0.98
-sigmoid_fp16x8_packed          mean time: 0.206304 ms, speedup: 1.01
-```
+依赖包括 NumPy、PyTorch、FlashInfer 的计时工具，以及即时编译所需的 Ninja、CUDA Toolkit 和匹配的 C++ 编译器。源码包含 `cuda_fp8.h`，不能只根据根目录的概括性版本判断兼容。参考 [PyTorch 扩展文档](https://docs.pytorch.org/docs/stable/cpp_extension.html) 与 [FlashInfer 安装说明](https://docs.flashinfer.ai/installation.html)。
+
+首次加载会编译 `sigmoid_lib`。模块名、CUDA 函数名和 Python 入口名是不同层次，遇到编译失败时先定位失败发生在哪一层。
+
+## 精度检查与性能解读
+
+原测试用 `torch.sigmoid(out=b)` 作为参考，遍历 n/m 为 1024、2048、4096 的九组组合。先 FP32，再 `.half()` 转换输入并重新建立 FP16 基准，最后逐元素比较输出。
+
+FP32 最大绝对误差阈值是 `<1e-5`，FP16 是 `<1e-3`。这并不意味着所有输入值域都满足阈值；随机常见值与极端值测试回答的是不同问题。输入分布、NaN/Inf、半精度溢出和小输出的相对误差都值得单独设计用例。不要随意放宽阈值来绕过问题。
+
+计时设置为冷 L2 缓存并多次重复，实际统计中位数；原输出的 `mean time` 字符串未在翻译中修改。速度比是参考耗时除以当前耗时，不同 GPU、精度、尺寸和缓存策略之间不能直接混比。
+
+## 原始示例输出
+
+完整历史输出保存在 [英文原文的 Sample output](./readme.en.md#sample-output) 中。数据与函数名原样保留，是原作者记录，不是本次重新测量。当前没有可用的 NVIDIA GPU/nvcc 环境，因此未进行 CUDA 编译、运行或性能复测。
+
+可在自己的 CUDA 环境按 [统一冒烟步骤](../../docs/zh-CN/激活函数对比.md)检查加载与有限输入结果；该步骤也不是全范围数值验证。
+
+## 练习
+
+手算 `σ(0)`，再把 half 版本的嵌套表达式展开成四步；比较其每一步的精度与“FP32 计算后转 half”的区别。然后用纸面索引验证 N=514 时 x2 版本的多余线程问题。最后说明：为什么既要检查访存范围，又要检查每个输出元素是否分配到了线程。
+
+本说明依据 `sigmoid.cu`、`test.py` 与 `pack.cuh`；限制保持原样，修复需要独立的算法提交。

@@ -1,0 +1,52 @@
+{
+  "base_commit": "ca40342f985a95be615585e02c130e13040f0e02",
+  "branch": "zh-cn-beginner",
+  "scope": "静态源码一致性检查；不是编译或 GPU 运行结果",
+  "cuda_compilation_performed": false,
+  "gpu_runtime_tests_performed": false,
+  "performance_tests_performed": false,
+  "checks": [
+    {
+      "path": "kernels/common/pack.cuh",
+      "original_blob": "31e4ad03da93ca1c68b5f807b86f478620fa3513",
+      "annotated_blob": "bb85aab2933b12f383375ae57a2f5d95809934c8",
+      "check": "去除普通注释和空白后的 C++ 词法序列一致，保留预处理指令"
+    },
+    {
+      "path": "kernels/elementwise/elementwise.cu",
+      "original_blob": "e6853d56d781253a94425fe6d78cdd8428978a75",
+      "annotated_blob": "0a1685f6729598faa7f22560a1edfcd126141153",
+      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+    },
+    {
+      "path": "kernels/elementwise/test.py",
+      "original_blob": "b1a0bdfb29d2489d1b17330b708b9bb82e9815db",
+      "annotated_blob": "751c43448ce1f79dc79b3c0bb79d3769aba0b9f3",
+      "check": "Python AST 一致（不比较源码位置属性）"
+    },
+    {
+      "path": "kernels/relu/relu.cu",
+      "original_blob": "a9915126fec74a538c7586eaebb10306e43fba1f",
+      "annotated_blob": "50c502863e1b45e48e5f737d2d6eed134e3c0508",
+      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+    },
+    {
+      "path": "kernels/relu/test.py",
+      "original_blob": "50be8eeecce88b167551392d528a6d08884c85e1",
+      "annotated_blob": "d132961d6afa843df336230453760343c79bfc14",
+      "check": "Python AST 一致（不比较源码位置属性）"
+    },
+    {
+      "path": "kernels/sigmoid/sigmoid.cu",
+      "original_blob": "a5a6c11fb7365fb981ef7c978bf0f656f4afe6db",
+      "annotated_blob": "0a03f1a041bc0d0517189090368f163dfd88cc78",
+      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+    },
+    {
+      "path": "kernels/sigmoid/test.py",
+      "original_blob": "6fc8b912dee9a010ec359d08bdd2d9cbe525000e",
+      "annotated_blob": "0eb53635e359b9599804a9899dbd1a5d69ce38eb",
+      "check": "Python AST 一致（不比较源码位置属性）"
+    }
+  ]
+}
