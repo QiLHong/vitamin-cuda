@@ -1,19 +1,23 @@
-# dsl_add
+# Triton 与 TileLang 向量加法对照
 
-## Overview
+[中文首页](../../../README.md) · [英文原文](./readme.en.md)
 
-- [x] triton add
-- [x] tilelang add
+原始命令、输出和数值原样保留；本次未复测。请先切换到本目录再执行，以匹配脚本的相对导入路径。
 
-## Run tests
+## 功能概览
+
+- [x] Triton 向量加法
+- [x] TileLang 向量加法
+
+## 运行测试
 
 ```bash
 python test.py
 ```
 
-## Sample output
+## 历史输出示例（非本次实测）
 
-## special cases test
+## 特殊尺寸测试
 
 ```yaml
 ####################################################################################################
@@ -46,7 +50,7 @@ elementwise_add_no_shared                mean time: 0.314000 ms, speedup: 0.96
 elementwise_add_fp16x8_packed            mean time: 0.302336 ms, speedup: 1.00
 ```
 
-### full benchmark
+### 完整基准测试的历史记录
 
 ```yaml
 ####################################################################################################
@@ -122,3 +126,11 @@ tilelang_vectorized                      mean time: 0.305072 ms, speedup: 1.00
 tilelang_vectorized_eager                mean time: 0.304336 ms, speedup: 1.00
 elementwise_add_fp16x8_packed            mean time: 0.304736 ms, speedup: 1.00
 ```
+
+## 实现阅读路线
+
+先读带尾部掩码的 Triton `add_kernel`，再读 TileLang 基础版、每线程八元素的显式向量化版，以及自动推断 `N` 的即时调用版。最后比较显式共享内存暂存与直接使用 fragment 两种写法。`elementwise_add_no_shared` 中变量仍叫 `A_shared` / `B_shared`，但实际分配的是 fragment，应以 `T.alloc_fragment` 为准。
+
+即时调用版按 dtype 位宽计算 `vec`，完整组判断却固定为 `base+7<N`；当前演示使用 FP16，不能据 `dtype` 参数推断任意位宽都已验证。对越过末尾的线程，`T.serial(N-base)` 与 `T.copy` 的保护需结合生成代码确认。中文注释没有修改这些逻辑。
+
+默认入口只执行 `test_sp()`，测试整组长度及前后各差一个元素的长度；`test_all()` 的调用仍被注释。运行需要 PyTorch、Triton、TileLang、NumPy、FlashInfer 和本地 CUDA 扩展构建环境，导入 `kernels.elementwise.test` 会编译 CUDA 加法扩展。各实现并非每一次计时后都立即进行独立误差检查，应按实际 `diff_check` 调用解读输出。计时取中位数，原日志标签 `mean time` 保留不变。

@@ -1,3 +1,10 @@
+/*
+ * 中文导读：每个线程块根据一个 INT32 索引，从嵌入表复制一行到输出。
+ * a 是 [seq_len] 索引，b 是 [词表大小,emd_dim] 表，c 是 [seq_len,emd_dim] 输出。
+ * 索引 dtype、合法范围及表/输出形状关系未在包装中完整检查；INT64 地址不能直接按 int* 使用。
+ * x4/x8 仅检查组起点，需要整组维度；packed 地址需按 16 字节对齐。
+ * 这些函数只搬运数据，不包含梯度计算或高层 embedding 的其他选项。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -13,7 +20,7 @@
 
 #include "../common/pack.cuh"
 
-// fp32
+// FP32 标量查表：线程沿嵌入维度按 blockDim.x 步长复制。
 
 __global__ void embedding_kernel(int *a, float *b, float *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
@@ -24,6 +31,7 @@ __global__ void embedding_kernel(int *a, float *b, float *c, int emd_dim) {
     }
 }
 
+// FP32x4：每线程用展开循环复制四个标量；源码的分组不保证某种具体机器访存指令。
 __global__ void embedding_fp32x4_kernel(int *a, float *b, float *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
     int in_offset = a[blockIdx.x] * emd_dim;
@@ -35,6 +43,7 @@ __global__ void embedding_fp32x4_kernel(int *a, float *b, float *c, int emd_dim)
     }
 }
 
+// FP32x4 packed：通过 128 位访问复制四个 float；不改变数值位模式。
 __global__ void embedding_fp32x4_packed_kernel(int *a, float *b, float *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
     int in_offset = a[blockIdx.x] * emd_dim;
@@ -44,7 +53,7 @@ __global__ void embedding_fp32x4_packed_kernel(int *a, float *b, float *c, int e
     }
 }
 
-// fp16
+// FP16 标量查表：索引关系与 FP32 相同，只改变表和输出的元素类型。
 __global__ void embedding_kernel(int *a, half *b, half *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
     int in_offset = a[blockIdx.x] * emd_dim;
@@ -54,7 +63,7 @@ __global__ void embedding_kernel(int *a, half *b, half *c, int emd_dim) {
     }
 }
 
-// fp16x8
+// FP16x8：每线程每轮复制八个标量，内部未逐元素检查行尾。
 __global__ void embedding_fp16x8_kernel(int *a, half *b, half *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
     int in_offset = a[blockIdx.x] * emd_dim;
@@ -66,7 +75,7 @@ __global__ void embedding_fp16x8_kernel(int *a, half *b, half *c, int emd_dim) {
     }
 }
 
-// fp16x8 packed r/w
+// FP16x8 打包读写：128 位一次搬运八个 half，要求整组维度和 16 字节对齐。
 __global__ void embedding_fp16x8_packed_kernel(int *a, half *b, half *c, int emd_dim) {
     int out_offset = blockIdx.x * emd_dim;
     int in_offset = a[blockIdx.x] * emd_dim;
@@ -78,8 +87,11 @@ __global__ void embedding_fp16x8_packed_kernel(int *a, half *b, half *c, int emd
 
 struct Generic {};
 
+// 这里只检查 CUDA 与连续性；索引范围、INT32 dtype 及输出容量仍由调用方保证。
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 每块对应一个索引，线程数为 min(512,emd_dim)/num。emd_dim<num 时可能得到零线程。
+// 按 b 的 dtype 分派，但未验证 c 的 dtype 相同；a 的地址固定重解释为 int*。
 #define binding_func_gen(name, num, element_dtype)                                                                     \
     void name(torch::Tensor a, torch::Tensor b, torch::Tensor c) {                                                     \
         CHECK_T(a);                                                                                                    \
@@ -120,7 +132,7 @@ binding_func_gen(embedding_fp32x4_packed, 4, float);
 binding_func_gen(embedding_fp16x8, 8, half);
 binding_func_gen(embedding_fp16x8_packed, 8, half);
 
-// binding
+// 将已实现的入口绑定到 Python；源码没有 embedding_fp16x2 入口。
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch_pybinding_func(embedding);

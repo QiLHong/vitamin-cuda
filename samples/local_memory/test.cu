@@ -1,3 +1,11 @@
+/*
+ * 中文导读：保留原本已有的中文实验注释，只补充阅读限制。
+ * 原注释中的“强制分配”是实验描述；取地址是否最终产生 local memory 访问应以生成码为准。
+ * __noinline__ 阻止函数内联，但本次没有编译 PTX/SASS，也未复测寄存器或栈帧统计。
+ * 三个核函数的 idx 只用 threadIdx.x，没有 blockIdx.x；包装的 num=4 与每线程 8 元素也不同。
+ * 原测试固定 N=512；不要直接将其扩展为通用多块拷贝或认为大尺寸已被完整覆盖。
+ * native 只搬运数据，bad/good 还将 half 分量加倍，因此三者并非同一数学操作的正确性对照。
+ */
 #include "../../kernels/common/pack.cuh"
 #include <cstdio>
 #include <cuda.h>
@@ -43,7 +51,7 @@ __global__ void load_fp16x8_native_kernel(half *input, half *output, int N) {
     FLOAT4(output[idx]) = FLOAT4(pack[0]); // ❌ 对pack取地址 → 强制分配到 local memory
 }
 
-// bad示例：外部函数调用，指针逃逸，避免编译器优化回物理寄存器
+// bad 示例：以指针传给禁止内联的设备函数，让编译器更难把局部数组完全标量化。
 __global__ void load_fp16x8_bad_kernel(half *input, half *output, int N) {
     const int idx = threadIdx.x * 8;
     if (idx >= N)
@@ -54,7 +62,7 @@ __global__ void load_fp16x8_bad_kernel(half *input, half *output, int N) {
 
     FLOAT4(output[idx]) = FLOAT4(pack[0]); // ❌ 对pack取地址 → 强制分配到 local memory
 }
-// good示例
+// good 示例：按值传递 float4，观察编译器生成结果与按指针方式的差异。
 __global__ void load_fp16x8_good_kernel(half *input, half *output, int N) {
     const int idx = threadIdx.x * 8;
     if (idx >= N)
@@ -83,7 +91,7 @@ binding_func_gen(load_fp16x8_native, 4, half);
 binding_func_gen(load_fp16x8_bad, 4, half);
 binding_func_gen(load_fp16x8_good, 4, half);
 
-// binding
+// 绑定三个实验入口，保留原调用顺序与名称。
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch_pybinding_func(load_fp16x8_native);

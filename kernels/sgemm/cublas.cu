@@ -1,4 +1,4 @@
-// adapted from https://github.com/xlite-dev/LeetCUDA/blob/main/kernels/sgemm/sgemm_cublas.cu
+// 改编自 https://github.com/xlite-dev/LeetCUDA/blob/main/kernels/sgemm/sgemm_cublas.cu
 #include <algorithm>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -16,6 +16,9 @@
 
 #include "cublas_v2.h"
 
+// 行主序 C=A@B 通过交换 A/B 和 M/N，转换为 cuBLAS 的列主序调用。
+// alpha=1、beta=0，结果覆盖 C；use_tf32 决定是否请求 FAST_TF32 计算模式。
+// 参数的数据存储类型仍为 CUDA_R_32F，计算模式与张量存储 dtype 是两个概念。
 void cublas_sgemm(float *A, float *B, float *C, size_t M, size_t N, size_t K, bool use_tf32) {
     cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
     static float alpha = 1.0;
@@ -63,6 +66,7 @@ void cublas_sgemm(float *A, float *B, float *C, size_t M, size_t N, size_t K, bo
     }
 }
 
+// 下面两个包装都要求连续 CUDA 张量；形状相容、同设备和输出容量仍由调用方保证。
 void sgemm_cublas(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     TORCH_CHECK(a.is_cuda() && b.is_cuda() && c.is_cuda(), "All tensors must be on CUDA");
     TORCH_CHECK(a.is_contiguous(), "Tensor A must be contiguous");

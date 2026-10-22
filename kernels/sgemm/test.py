@@ -10,7 +10,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="gemm_lib",
     sources=[str(current_dir / "sgemm.cu"), str(current_dir / "cublas.cu"), str(current_dir / "sgemm_tf32.cu")],
@@ -32,9 +32,11 @@ lib = load(
 baseline = None
 
 
+# 用主机时钟测重复调用的总时间，前后同步后除以 rep；包含这一调用方式下的调度开销。
+# 正确性由后续 diff_check 单独比较；完成计时并不自动证明结果正确。
 def benchmark(op, a, b, c=None, warmup=10, rep=200, prefix="torch"):
     if c is not None:
-        # warm up
+        # 预热，减小首次执行开销对计时的影响。
         for i in range(warmup):
             op(a, b, c)
         torch.cuda.synchronize()
@@ -43,7 +45,7 @@ def benchmark(op, a, b, c=None, warmup=10, rep=200, prefix="torch"):
             op(a, b, c)
         torch.cuda.synchronize()
     else:
-        # warm up
+        # 预热，减小首次执行开销对计时的影响。
         for i in range(warmup):
             op(a, b)
         torch.cuda.synchronize()
@@ -75,7 +77,7 @@ def diff_check(a, b, prefix="torch", eps=1e-3):
 
 
 def test_all():
-    # test the kernel
+    # 测试各核函数。
     ns = [256, 512, 1024, 4096, 8192]
     torch.manual_seed(42)
     for i, m in enumerate(ns):
@@ -83,12 +85,12 @@ def test_all():
             for n in ns[i-1:i+1]:
                 print("#" * 100)
                 print(f"m: {m}, n: {n}, k: {k}")
-                # a x b = c
+                # 矩阵乘法：a × b = c。
                 a = torch.randn(m, k).float().cuda()
                 b = torch.randn(k, n).float().cuda()
                 c = torch.zeros(m, n).float().cuda()
                 print("#" * 45 + "CUDA CORE" + "#" * 46)
-                # cuda core
+                # CUDA 核心路径。
                 benchmark(partial(torch.matmul, out=c), a, b)
                 c_cublas = torch.zeros_like(c)
                 benchmark(lib.sgemm_cublas, a, b, c_cublas, prefix="sgemm_cublas")
@@ -106,7 +108,7 @@ def test_all():
                 diff_check(c, c_my, prefix="sgemm_at_bcf_swizzling_rw")
 
                 print("#" * 44 + "Tensor Core" + "#" * 45)
-                # Tensor core
+                # Tensor Core 路径。
                 benchmark(
                     lib.sgemm_cublas_tf32,
                     a,
@@ -120,12 +122,12 @@ def test_4096():
     m, n, k = [4096] * 3
     print("#" * 100)
     print(f"n: {n}, m: {m}, k: {k}")
-    # a x b = c
+    # 矩阵乘法：a × b = c。
     a = torch.randn(m, k).float().cuda()
     b = torch.randn(k, n).float().cuda()
     c = torch.zeros(m, n).float().cuda()
 
-    # cuda core
+    # CUDA 核心路径。
     benchmark(partial(torch.matmul, out=c), a, b)
     c_cublas = torch.zeros_like(c)
     benchmark(lib.sgemm_cublas, a, b, c_cublas, prefix="sgemm_cublas")
@@ -144,7 +146,7 @@ def test_4096():
     benchmark(lib.sgemm_at_bcf_swizzling_dbf_rw, a, b, c_my, prefix="sgemm_at_bcf_swizzling_dbf_rw")
     diff_check(c, c_my, prefix="sgemm_at_bcf_swizzling_dbf_rw")
 
-    # Tensor core
+    # Tensor Core 路径。
     benchmark(
         lib.sgemm_cublas_tf32,
         a,
@@ -158,16 +160,16 @@ def test_tf32_4096():
     m, n, k = [4096] * 3
     print("#" * 100)
     print(f"n: {n}, m: {m}, k: {k}")
-    # a x b = c
+    # 矩阵乘法：a × b = c。
     a = torch.randn(m, k).float().cuda()
     b = torch.randn(k, n).float().cuda()
     c = torch.zeros(m, n).float().cuda()
     c_cublas = torch.zeros_like(c)
-    # cuda core
+    # CUDA 核心路径。
     benchmark(partial(torch.matmul, out=c), a, b)
     c_cublas = torch.zeros_like(c)
 
-    # Tensor core
+    # Tensor Core 路径。
     benchmark(
         lib.sgemm_cublas_tf32,
         a,

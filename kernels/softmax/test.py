@@ -1,3 +1,5 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 各入口的缓存容量和 dtype 限制见 softmax.cu；有边界判断不意味着任意行宽都支持。
 from functools import partial
 from pathlib import Path
 
@@ -10,7 +12,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="softmax_lib",
     sources=[str(current_dir / "softmax.cu")],
@@ -44,6 +46,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 这里统计的是中位数；原有输出字符串仍写 mean time，翻译不修改运行日志。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -168,7 +171,7 @@ def test_run():
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行下面列出的核函数测试配置。
     test_small()
     # test_large()
     # test_run()

@@ -1,20 +1,39 @@
-# LLM Generattion Sampling Kernels
+# LLM 生成阶段的采样核函数
 
-Mainly use `array insertion sort && merge`
+[英文原文](./readme.en.md) · [中文首页](../../README.md) · [翻译进度](../../docs/zh-CN/翻译进度.md)
 
-- [x] sampling_topk_topp_batched
-- [x] sampling_topk_topp_split_k
+> 本页翻译并保留原始章节、命令与历史输出；本次仅修改文档和源码注释，未进行 CUDA 编译、GPU 正确性测试或性能复测。
 
-## Test
+主要使用“数组插入排序与候选合并”（`array insertion sort && merge`）。
+
+- [x] `sampling_topk_topp_batched`：每个批次行使用一个线程块
+- [x] `sampling_topk_topp_split_k`：词表分片后合并候选
+
+## 中文阅读指引与原实现限制
+
+[CUDA 实现](./sampling.cu) 先在各线程维护降序的 Top-K 小数组，再在线程束和线程块之间合并。`batched` 每行使用一个块；`split_k` 将词表分成固定 26 份，第一阶段写出分片候选，第二阶段完成合并。随后只在 Top-K 候选上计算 softmax，累计概率达到 `top_p` 时保留该前缀，并用 Philox 随机数进行 CDF 采样。这是“先 Top-K，再 Top-P”的顺序。
+
+**当前源码有尚未修复的限制，不能把功能列表当作正确性保证：**
+
+- 两个加载 logits 的核函数都把 128 位数据放入 `pack128`，再用 `tmp.h[x]` 按 FP16 解码；即使模板分派选择 BF16，读取方式也没有改成 BF16。因此现有 BF16 路径会把位模式按错误类型解释，本次仅补充说明。
+- 实际 `top_k` 分支为 `1、2、4、8、16、20`；原英文错误消息称支持到 32 的 2 次幂，与代码不符，错误字符串仍保留原样。
+- 一次宽访存读取 8 个元素，只检查组起点。需要 `vocab_size` 为 8 的倍数并满足 16 字节对齐；非整组词表尾部没有完整保护。
+- FP16/BF16 以外的 dtype 没有分派报错分支，可能返回尚未写入的结果。非空词表、有限有效 logits、`top_p` 范围和形状等也没有完整校验。相同分数的候选保留受插入顺序影响，不保证与其他库的 tie-breaking 相同。
+
+Python 代码包含原始英文 docstring。为保持 Python AST 与运行时 `__doc__` 一致，本分支保留它们，并在旁边添加完整中文说明。源注释中的原作者 `NOTE(woosuk)`/`TODO(woosuk)` 标记也保留。
+
+`test.py` 默认调用 `test_on_real_logits()`，会读取 `./data/qwen3_8b_logits/logits_0.npy` 到 `logits_4.npy`；这些数据不随仓库提供，需自行准备。`test_with_cold_l2.py` 使用生成的尖峰数据，固定 CUDA Event 计时方法，只切换是否请求每轮清理 L2，返回样本中位数。脚本主要比较耗时，没有检验采样概率分布；使用相同 seed 不代表不同实现必须逐词元相同。
+
+## 测试
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-## Sample output
+## 历史示例输出
 
-### benchmark with cold L2 cache (against flashinfer 0.6.9)
+### 冷 L2 缓存基准（原记录对比 FlashInfer 0.6.9）
 
 ```yaml
 GPU: NVIDIA GeForce RTX 5060 Laptop GPU  fi=0.6.9
@@ -77,7 +96,7 @@ bs32/320k     flashinfer                0.7970          0.8069       1.01x
 bs32/320k     custom_batched            0.1460          0.1734       1.19x       4.65x
 ```
 
-### random spike data
+### 随机尖峰数据
 
 ```yaml
 ####################################################################################################
@@ -166,7 +185,7 @@ flashinfer                               mean time: 0.774221 ms, speedup: 7.29, 
 sampling_topk_topp_batched               mean time: 0.137926 ms, speedup: 40.92, 148.49 GB/s
 ```
 
-### real qwen3-8b logits data
+### 真实 Qwen3-8B logits 数据
 
 ```yaml
 ####################################################################################################

@@ -10,7 +10,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="hgemm_sm120_lib",
     sources=[str(current_dir / "hgemm_sm120.cu"), str(current_dir / "cublas.cu")],
@@ -33,9 +33,11 @@ lib = load(
 baseline = None
 
 
+# 用主机时钟测重复调用的总时间，前后同步后除以 rep；包含这一调用方式下的调度开销。
+# 正确性由后续 diff_check 单独比较；完成计时并不自动证明结果正确。
 def benchmark(op, a, b, c=None, warmup=10, rep=200, prefix="torch"):
     if c is not None:
-        # warm up
+        # 预热，减小首次执行开销对计时的影响。
         for i in range(warmup):
             op(a, b, c)
         torch.cuda.synchronize()
@@ -44,7 +46,7 @@ def benchmark(op, a, b, c=None, warmup=10, rep=200, prefix="torch"):
             op(a, b, c)
         torch.cuda.synchronize()
     else:
-        # warm up
+        # 预热，减小首次执行开销对计时的影响。
         for i in range(warmup):
             op(a, b)
         torch.cuda.synchronize()
@@ -79,7 +81,7 @@ def diff_check(a, b, prefix="torch", eps=0.016):
 
 
 def test_all():
-    # test the kernel
+    # 测试各核函数。
     ns = [256, 512, 1024, 4096, 8192]
     torch.manual_seed(42)
     # for type in [torch.bfloat16, torch.float16]:
@@ -87,12 +89,12 @@ def test_all():
         for n in ns:
             print("#" * 100)
             print(f"m: {n}, n: {n}, k: {n}")
-            # a x b = c
+            # 矩阵乘法：a × b = c。
             a = torch.randn(n, n).to(type).cuda()
             b = torch.randn(n, n).to(type).cuda()
             c = torch.zeros(n, n).to(type).cuda()
             print("#" * 100)
-            # cuda core
+            # PyTorch 与 cuBLAS 参考路径，具体硬件执行路径由库选择。
             benchmark(partial(torch.matmul, out=c), a, b)
             c_cublas = torch.zeros_like(c)
             benchmark(
@@ -112,7 +114,7 @@ def test_4096():
     print(f"n: {n}, m: {m}, k: {k}")
     # for type in [torch.bfloat16, torch.float16]:
     for type in [torch.bfloat16]:
-        # a x b = c
+        # 矩阵乘法：a × b = c。
         a = torch.randn(m, k).to(type).cuda()
         b = torch.randn(k, n).to(type).cuda()
         c = torch.zeros(m, n).to(type).cuda()

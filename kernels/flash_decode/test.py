@@ -1,3 +1,5 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 当前是单查询位置：Q 为 [head,dim]，K/V 为 [seq,kv_head,dim]，与 prefill 的四维布局不同。
 import math
 import numpy as np
 from functools import partial
@@ -13,7 +15,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="flash_decode",
     sources=[str(current_dir / "flash_decode.cu")],
@@ -78,6 +80,7 @@ def benchmark(op, q, k, v, o=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 这里统计的是中位数；原有输出字符串仍写 mean time，翻译不修改运行日志。
     avg_duration = float(np.median(times))
 
     if prefix == "flash-infer":
@@ -120,7 +123,7 @@ def test_all():
         v = torch.randn(seq, kv_head, dim, device="cuda", dtype=torch.bfloat16)
 
         o = benchmark(torch_native_decode, q, k, v, prefix="torch")
-        # flashinfer throw exception!
+        # 原作者记录：此配置下 FlashInfer 会抛出异常；本次未复测。
         o = benchmark(
             flashinfer.single_decode_with_kv_cache, q, k, v, prefix="flash-infer"
         )

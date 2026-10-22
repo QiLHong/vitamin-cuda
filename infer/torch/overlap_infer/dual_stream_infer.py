@@ -1,3 +1,5 @@
+# 中文导读：固定大矩阵的权重搬运实验，使用页锁定 CPU 内存和 CUDA 事件表达依赖。
+# 原类 docstring 与输出字符串保留；事件复用、跨次调用和硬件重叠效果仍需实际验证。
 import torch
 import torch.nn as nn
 import math
@@ -8,6 +10,7 @@ NUM_LAYERS = 24
 DTYPE = torch.bfloat16  # 采用 BF16
 
 
+# 基准模型：所有层权重常驻 GPU。保留下方原 docstring，避免改变运行时 __doc__。
 class BaseMLPModel(nn.Module):
     """base model"""
 
@@ -25,6 +28,7 @@ class BaseMLPModel(nn.Module):
         return x
 
 
+# 双缓冲、双 CUDA 流模型：GPU 只保留两个权重槽，CPU 权重按层搬入。
 class DualStreamModel(nn.Module):
     """double buffer, double stream"""
 
@@ -40,7 +44,7 @@ class DualStreamModel(nn.Module):
             torch.empty((FEAT_DIM, FEAT_DIM), dtype=DTYPE, device=self.device),
         ]
 
-        # copy stream, two events
+        # 拷贝流以及每个缓冲槽的两类事件：拷贝完成后才能读，计算完成后才能覆盖。
         self.copy_stream = torch.cuda.Stream(device=self.device)
         self.events_copy_done = [torch.cuda.Event(), torch.cuda.Event()]
         self.event_compute_done = [torch.cuda.Event(), torch.cuda.Event()]
@@ -48,16 +52,17 @@ class DualStreamModel(nn.Module):
     def forward(self, x):
         compute_stream = torch.cuda.current_stream(self.device)
 
-        # --- prologue ---
+        # 序言：预取第一层。后续权重在主循环中与当前层计算交错提交。
+        # 此处没有等待上一次 forward 对 0 号槽的计算事件；跨调用复用需要另行验证。
         with torch.cuda.stream(self.copy_stream):
             self.weight_buffers[0].copy_(self.cpu_weights[0], non_blocking=True)
             self.events_copy_done[0].record(self.copy_stream)
         read_idx, write_idx = 0, 1
 
-        # --- main loop ---
+        # 主循环：read_idx 供当前层读取，write_idx 准备下一层。
         for i in range(self.num_layers):
 
-            # 1. 【后台】异步预取下一层 i+1 到 write_idx buffer
+            # 1. 【后台】异步预取下一层 i+1 到 write_idx 缓冲槽。
             if i + 1 < self.num_layers:
                 if i >= 1:
                     self.copy_stream.wait_event(self.event_compute_done[write_idx])
@@ -68,12 +73,12 @@ class DualStreamModel(nn.Module):
                     )
                     self.events_copy_done[write_idx].record(self.copy_stream)
 
-            # 2. 【前台】等待当前 buffer copy 完毕并就地计算
+            # 2. 【前台】在计算流等待当前槽拷贝完成；矩阵乘法产生新的 x。
             compute_stream.wait_event(self.events_copy_done[read_idx])
             x = x @ self.weight_buffers[read_idx]
             self.event_compute_done[read_idx].record(compute_stream)
 
-            # 交换 buffer
+            # 用异或 1 在两个缓冲槽之间切换。
             read_idx ^= 1
             write_idx ^= 1
 
@@ -96,7 +101,7 @@ def benchmark():
     model_base = BaseMLPModel(NUM_LAYERS, pinned_cpu_weights, device)
     model_stream = DualStreamModel(NUM_LAYERS, pinned_cpu_weights, device)
 
-    # warmup
+    # 预热两轮，然后同步，避免把首次执行因素直接算入正式计时。
     for _ in range(2):
         out_std = model_base(x)
         out_stream = model_stream(x)
@@ -106,7 +111,7 @@ def benchmark():
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
 
-    # 1. base model
+    # 1. 测量全量常驻模型；此时双缓冲模型的两个设备缓冲也已经分配。
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     start.record()
@@ -117,7 +122,7 @@ def benchmark():
     std_time = start.elapsed_time(end) / iters
     std_mem = torch.cuda.max_memory_allocated(device) / (1024**2)
 
-    # 2. double stream model
+    # 2. 删除全量模型后测量双流模型；峰值统计包含当时仍驻留的其他张量。
     del model_base
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
@@ -132,6 +137,8 @@ def benchmark():
     assert torch.allclose(out_std, out_stream, rtol=1e-2, atol=1e-2), "diff error"
 
     # 3. 核心指标对比
+    # 这里定义的是“基准耗时/双流耗时”，不是额外耗时占基准的比例。
+    # 最后原日志的“牺牲计算耗时”措辞沿用原文；解读时请以此公式为准。
     speed_retention = (std_time / off_time) * 100 if off_time > 0 else 0
     mem_saved_mb = std_mem - off_mem
     mem_reduction_pct = (mem_saved_mb / std_mem) * 100 if std_mem > 0 else 0

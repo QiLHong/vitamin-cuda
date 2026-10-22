@@ -1,27 +1,45 @@
-# embedding
+# embedding：嵌入表查找
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-Embedding lookup kernels.
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
+
+## 概述
+
+根据索引从嵌入表中读取对应向量的核函数。
 
 - [x] embedding — FP32 / FP16
-- [x] embedding_fp32x4 — vectorized FP32
-- [x] embedding_fp32x4_packed — vectorized FP32, packed r/w
-- [x] embedding_fp16x2 — vectorized FP16
-- [x] embedding_fp16x8 — vectorized FP16
-- [x] embedding_fp16x8_packed — vectorized FP16, packed r/w
-- [x] pytorch op bindings && diff check
+- [x] embedding_fp32x4 — FP32 向量化
+- [x] embedding_fp32x4_packed — FP32 向量化、打包读写
+- [x] embedding_fp16x2 — FP16 向量化（原清单条目，当前源码没有该绑定）
+- [x] embedding_fp16x8 — FP16 向量化
+- [x] embedding_fp16x8_packed — FP16 向量化、打包读写
+- [x] PyTorch 算子绑定与结果差异检查
 
-## Run tests
+## 中文导读与适用范围
 
-Large embedding tables need a GPU with plenty of VRAM.
+`a` 是长度为 `seq_len` 的 INT32 索引，`b` 是形状 `[词表大小, emd_dim]` 的嵌入表，`c` 是预分配的 `[seq_len, emd_dim]` 输出。每个线程块负责一个索引，把 `b[a[row], :]` 拷贝到 `c[row, :]`。这只是查表搬运，不计算梯度，也不提供 `padding_idx` 等高层接口选项。
+
+非 packed 的 x4/x8 版本每线程顺序复制 4/8 个标量，packed 版本使用一次 128 位访问搬运相同字节。前者的名称并不保证生成某种特定的机器访存指令；最终指令需查看实际编译结果。
+
+FP32x4 要求 `emd_dim` 为 4 的正整数倍，FP16x8 要求为 8 的正整数倍，packed 地址需按 16 字节对齐。向量循环仅检查组起点，内部 4/8 次访问没有单独保护；若维数小于组大小，包装还可能得到零线程的启动配置。
+
+包装没有验证索引 dtype 和取值范围，而是直接按 `int*` 读取。必须使用 INT32，且所有索引满足 `0 <= index < 词表大小`；不能把 INT64 索引直接传入。调用方也应保证表和输出 dtype、形状、设备一致及无有害重叠。原清单中的 `embedding_fp16x2` 在当前源码里没有实现或绑定，不能直接调用。
+
+## 运行测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
+
+较大的嵌入表需要显存充足的 GPU。原命令固定了计算能力 `8.9`；实际运行应按本机 GPU 和 CUDA 工具链支持情况设置 `TORCH_CUDA_ARCH_LIST`，不能把该值当成通用配置。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=8.9
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
+
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
 
 ```bash
 ####################################################################################################

@@ -1,3 +1,10 @@
+/*
+ * 中文导读：对连续二维输入的每一行计算包含当前位置的前缀和，输出形状与输入相同。
+ * 普通版本一块一行，按段累积；split-k 版本先处理各分块，再补上此前分块的总和。
+ * 标量访问检查单个元素；x4/x8 仅检查组起点，行长分别需为 4/8 的正整数倍。
+ * 128 位读写还要求地址按 16 字节对齐；CUDA/连续性检查不等于完整形状、dtype 和设备检查。
+ * 这是文档与注释翻译，不修改算法；multi-CTA 单核扫描入口仍是空实现。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -12,6 +19,8 @@
 
 #include "../common/pack.cuh"
 
+// 逐轮从前面 offset 个 lane 取累计值；lane_id 较小时不加入无效的前驱。
+// 原循环上界写的是 WARP_SIZE，并没有使用模板参数 warp_size；调用需要完整线程束参与。
 template <const int warp_size = WARP_SIZE>
 __device__ __forceinline__ float _warp_cum_sum(int lane_id, float val) {
 #pragma unroll
@@ -24,7 +33,7 @@ __device__ __forceinline__ float _warp_cum_sum(int lane_id, float val) {
     return val;
 }
 
-// 1 cta for one row
+// 一个线程块（CTA）处理一行，delta 保存此前各段的累计和。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 256>
 __global__ void cumsum_fp32_kernel(float *a, float *b, int n) {
     int tid = threadIdx.x;
@@ -42,10 +51,10 @@ __global__ void cumsum_fp32_kernel(float *a, float *b, int n) {
     for (int i = 0; i < n; i += BLOCK_SIZE) {
         int col = i + tid;
         float val = (col < n) ? a[row_offset + col] : 0.0f;
-        // warp
+        // 在线程束内做包含当前位置的扫描。
         val = _warp_cum_sum<32>(lane_id, val);
 
-        // block
+        // 每个线程束的末尾元素写入总和，再由第一个线程束扫描这些总和。
         if (lane_id == 32 - 1)
             smem[warp_id] = val;
         __syncthreads();
@@ -77,7 +86,7 @@ __global__ void cumsum_fp32_kernel(float *a, float *b, int n) {
     }
 }
 
-// bf16: bf16 I/O, float accumulate
+// BF16 输入输出，使用 FP32 累加；写回时才舍入为 BF16。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 256>
 __global__ void cumsum_bf16_kernel(__nv_bfloat16 *a, __nv_bfloat16 *b, int n) {
     int tid = threadIdx.x;
@@ -128,6 +137,8 @@ __global__ void cumsum_bf16_kernel(__nv_bfloat16 *a, __nv_bfloat16 *b, int n) {
     }
 }
 
+// 进入此函数前，四个寄存器已保存线程内前缀和；f[3] 是本线程四元素总和。
+// 每轮交换前驱线程的总和，并把它加到当前线程的全部四个前缀上。
 template <const int warp_size = WARP_SIZE>
 __device__ __forceinline__ void _warp_cum_sum(int lane_id, pack128 &val) {
 #pragma unroll
@@ -141,7 +152,7 @@ __device__ __forceinline__ void _warp_cum_sum(int lane_id, pack128 &val) {
     }
 }
 
-// warp cumsum over N float registers using the last element as the lane aggregate
+// 对每线程 N 个 float 寄存器做线程束扫描，以最后一个元素表示该线程的累计总和。
 template <const int N, const int warp_size = WARP_SIZE>
 __device__ __forceinline__ void _warp_cum_sum_n(int lane_id, float (&val)[N]) {
 #pragma unroll
@@ -155,6 +166,8 @@ __device__ __forceinline__ void _warp_cum_sum_n(int lane_id, float (&val)[N]) {
     }
 }
 
+// 每线程连续读取四个 FP32，先做线程内扫描，再累积此前线程与线程束的总和。
+// col<n 仅保护组起点；最后不足四个元素时，float4 访问仍可能越过行尾。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 1024>
 __global__ void cumsum_fp32x4_kernel(float *a, float *b, int n) {
     int tid = threadIdx.x;
@@ -209,7 +222,7 @@ __global__ void cumsum_fp32x4_kernel(float *a, float *b, int n) {
     }
 }
 
-// bf16x8 packed r/w
+// BF16x8：128 位打包读写，每线程在 FP32 中扫描八个元素。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 2048>
 __global__ void cumsum_bf16x8_packed_kernel(__nv_bfloat16 *a, __nv_bfloat16 *b, int n) {
     int tid = threadIdx.x;
@@ -276,6 +289,8 @@ __global__ void cumsum_bf16x8_packed_kernel(__nv_bfloat16 *a, __nv_bfloat16 *b, 
     }
 }
 
+// 用 XOR 交换累加线程束内总和，供 split-k 第二轮合并此前分块的总和。
+// 此处同样按 WARP_SIZE 循环；模板实参不会缩短实际参与的线程束。
 template <const int warp_size = WARP_SIZE>
 __device__ __forceinline__ void _warp_reduce(float &val) {
 #pragma unroll
@@ -283,7 +298,7 @@ __device__ __forceinline__ void _warp_reduce(float &val) {
         val += __shfl_xor_sync(0xffffffff, val, offset);
 }
 
-// split-k pass 1: local inclusive scan + write chunk sum
+// split-k 第一轮：计算分块内包含当前位置的前缀和，并写出该分块的总和。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 1024>
 __global__ void cumsum_fp32x4_split_k_pass_1_kernel(float *a, float *b, float *ws_sum, int n) {
     int tid = threadIdx.x;
@@ -331,7 +346,7 @@ __global__ void cumsum_fp32x4_split_k_pass_1_kernel(float *a, float *b, float *w
     }
 }
 
-// split-k pass 2: exclusive prefix of chunk sums + add back
+// split-k 第二轮：求当前分块之前所有分块的总和，再加到本块的局部扫描结果上。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 1024>
 __global__ void cumsum_fp32x4_split_k_pass_2_kernel(float *b, float *ws_sum, int n) {
     int tid = threadIdx.x;
@@ -374,12 +389,15 @@ __global__ void cumsum_fp32x4_split_k_pass_2_kernel(float *b, float *ws_sum, int
     }
 }
 
-// multi-CTA single kernel (TODO)
+// 多个线程块在单个核函数中协作扫描：尚待实现（TODO），当前函数体为空。
 template <const int BLOCK_SIZE = 256, const int CHUNK_SIZE = 1024>
 __global__ void cumsum_fp32x4_multi_cta_scan_kernel(float *a, float *b, int n) {}
 
+// 包装只检查 CUDA 和连续性。a/b 必须是同设备、同 dtype、同形状的二维张量；调用方负责保证。
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 每块 256 线程，每段处理 256*num 个元素；a.size(0) 决定行数，a.size(1) 决定行长。
+// 指针重解释不会转换 dtype；宏本身没有检查输入是否与 ptr_type 匹配。
 #define binding_func_gen(name, num, ptr_type)                                                                          \
     void name(torch::Tensor a, torch::Tensor b) {                                                                      \
         CHECK_T(a);                                                                                                    \
@@ -400,6 +418,8 @@ binding_func_gen(cumsum_fp32x4, 4, float);
 binding_func_gen(cumsum_bf16, 1, __nv_bfloat16);
 binding_func_gen(cumsum_bf16x8_packed, 8, __nv_bfloat16);
 
+// 工作区每行每块保存一个总和；两轮在同一流中顺序提交以建立先写后读的依赖。
+// 第二轮每块重新汇总此前所有块的总和，分块数越多并不必然越快。
 void cumsum_fp32x4_split_k(torch::Tensor a, torch::Tensor b) {
     CHECK_T(a);
     CHECK_T(b);
@@ -424,6 +444,7 @@ void cumsum_fp32x4_split_k(torch::Tensor a, torch::Tensor b) {
         reinterpret_cast<float *>(b.data_ptr()), ws_sum.data_ptr<float>(), lda);
 }
 
+// 此包装绑定了空核函数；调用后不能期待 b 得到前缀和结果。
 void cumsum_fp32x4_multi_cta_scan(torch::Tensor a, torch::Tensor b) {
     CHECK_T(a);
     CHECK_T(b);

@@ -1,3 +1,6 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 本入口供 Nsight Compute 采集使用；分析器运行会改变计时条件，不能直接与普通计时混用。
+# 当前是单查询位置：Q 为 [head,dim]，K/V 为 [seq,kv_head,dim]，与 prefill 的四维布局不同。
 import math
 import time
 from functools import partial
@@ -11,7 +14,7 @@ from torch.utils.cpp_extension import load
 torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="flash_decode",
     sources=["flash_decode.cu"],
@@ -60,7 +63,7 @@ def torch_native_decode(q, k, v, scale=None):
 def benchmark(op, q, k, v, o=None, warmup=0, rep=1, prefix="torch"):
     scale = 1 / math.sqrt(q.shape[-1])
     if prefix == "flash-infer":
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             op(q, k, v)
         torch.cuda.synchronize()
@@ -69,7 +72,7 @@ def benchmark(op, q, k, v, o=None, warmup=0, rep=1, prefix="torch"):
             op(q, k, v)
         torch.cuda.synchronize()
     elif o is not None:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             op(q, k, v, o, scale)
         torch.cuda.synchronize()
@@ -78,7 +81,7 @@ def benchmark(op, q, k, v, o=None, warmup=0, rep=1, prefix="torch"):
             op(q, k, v, o, scale)
         torch.cuda.synchronize()
     else:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             o = op(q, k, v, scale)
         torch.cuda.synchronize()
@@ -127,7 +130,7 @@ def test_all():
         v = torch.randn(seq, kv_head, dim, device="cuda", dtype=torch.bfloat16)
 
         o = benchmark(torch_native_decode, q, k, v, prefix="torch")
-        # # flashinfer throw exception!
+        # # 原作者记录：此配置下 FlashInfer 会抛出异常；本次未复测。
         # o = benchmark(
         #     flashinfer.single_decode_with_kv_cache, q, k, v, prefix="flash-infer"
         # )

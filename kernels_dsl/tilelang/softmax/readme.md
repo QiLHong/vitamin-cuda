@@ -1,18 +1,22 @@
-# softmax
+# TileLang Softmax
 
-## Overview
+[中文首页](../../../README.md) · [英文原文](./readme.en.md)
 
-- [x] tilelang softmax (naive two pass)
+此页保留原始命令和性能输出。本次只翻译与补注释，没有执行 GPU 测试。运行前请切换到本目录；脚本通过相对路径导入手写 CUDA Softmax 测试模块，导入过程会编译 CUDA 扩展。
 
-## Run tests
+## 功能概览
+
+- [x] TileLang Softmax（基础的两遍扫描版本）
+
+## 运行测试
 
 ```bash
 python test.py
 ```
 
-## Sample output
+## 历史输出示例（非本次实测）
 
-### test_small
+### 小尺寸行测试：`test_small`
 
 ```yaml
 #################################################################################################### test_small
@@ -65,7 +69,7 @@ softmax_arbitrary              mean time: 0.031596 ms, speedup: 4.20
 tl.float16                     mean time: 0.052698 ms, speedup: 2.52
 ```
 
-### test_large
+### 大尺寸行测试：`test_large`
 
 ```yaml
 #################################################################################################### test_large
@@ -123,3 +127,11 @@ softmax_arbitrary              mean time: 10.165219 ms, speedup: 0.67
 softmax_splitk                 mean time: 2.582483 ms, speedup: 2.62
 tl.float16                     mean time: 10.496631 ms, speedup: 0.64
 ```
+
+## 中文导读与适用范围
+
+每个线程块负责一行。第一遍按最多 8192 个元素分块，计算块内最大值与指数和，再把不同块的统计量换算到共同的最大值基准；第二遍重新读取输入，用整行的最大值和指数和生成输出。统计量采用 FP32；输入与输出类型由 `dtype` 决定。
+
+原注释写“dim 是 2 的幂”，但 `test_large()` 也包含 114688（8192 的 14 倍）。应以实际测试集合和分块条件理解范围。源码没有显式将尾块无效元素填为负无穷，不能只凭 `T.copy` 或向上取整网格就断定所有非整块长度的 Softmax 正确；需要检查对应 TileLang 版本生成的掩码与归约语义。
+
+脚本需要 PyTorch、TileLang、NumPy、FlashInfer 与 CUDA 构建环境。`test_small()` 和 `test_large()` 都在默认入口中执行，最后几项会分配很大的输入。历史计时来自所导入的 `benchmark`，原日志 `mean time` 对应的实现实际使用中位数。历史数字不代表本次通过了正确性、边界或性能检查。

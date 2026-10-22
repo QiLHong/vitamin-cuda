@@ -1,3 +1,11 @@
+/*
+ * 中文导读：输入/输出按连续二维 [bs,hidden_size] 解释，对每一行最后一维做 softmax。
+ * “safe”指用最大值平移改善指数计算的数值稳定性，不表示任意形状或特殊值都安全。
+ * 单块版本先缓存行数据；arbitrary 重新读取输入，splitk 将一行分给多个块再合并统计量。
+ * 向量化版本只检查数据组起点，FP32×4/FP16×8 仍要求行宽分别为 4/8 的倍数及 16 字节对齐。
+ * 各固定缓存版本的容量有限，包装未自动检查容量；见对应核函数与中文 README 的限制表。
+ * 本次只修改普通注释，未执行 CUDA 编译、GPU 正确性或性能复测。
+ */
 #include <ATen/cuda/CUDAContext.h>
 #include <cfloat>
 #include <cstdio>
@@ -11,6 +19,8 @@
 
 #include "../common/pack.cuh"
 
+// 一个数据集合的状态：(m,d)=(最大值, sum(exp(x-m)))。
+// 合并两个集合时先统一最大值，再缩放各自的 d，避免直接对原始 x 取指数。
 struct __align__(8) MD {
     float m;
     float d;
@@ -55,6 +65,7 @@ __device__ __forceinline__ MD block_online_softmax_reduce(MD val) {
     return val;
 }
 
+// 此版本省略最终的全块广播，调用方只让 threadIdx.x==0 写出归约结果。
 template <const int BLOCK_SIZE>
 __device__ __forceinline__ MD block_online_softmax_reduce_no_broadcast(MD val) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
@@ -76,8 +87,10 @@ __device__ __forceinline__ MD block_online_softmax_reduce_no_broadcast(MD val) {
     return val;
 }
 
-// ============================================== kernels
+// ============================================== 核函数
 
+// 每个线程最多缓存 WARP_SIZE=32 个标量；当前 BLOCK_SIZE=256 时最多覆盖 8192 列。
+// 超过该容量的列不会被处理；核内的 offset 判断不能代替主机侧容量检查。
 template <const int BLOCK_SIZE = 256, typename T>
 __global__ void softmax_kernel(T *a, T *b, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -114,6 +127,8 @@ __global__ void softmax_kernel(T *a, T *b, int hidden_size) {
     }
 }
 
+// 每线程最多 8 组 float4，当前容量仍为 8192 列；offset<hidden_size 只保护组起点。
+// 输入行宽须为 4 的倍数，确保每次 16 字节读写都在当前行内并满足对齐。
 template <const int BLOCK_SIZE = 256>
 __global__ void softmax_fp32x4_kernel(float *a, float *b, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -155,7 +170,8 @@ __global__ void softmax_fp32x4_kernel(float *a, float *b, int hidden_size) {
         }
     }
 }
-// pure register cache, hidden_size <= 8192
+// 仅用寄存器缓存。原注释写 hidden_size<=8192；当前 16 组×256 线程×8 元素可覆盖 32768 个元素。
+// 这是按源码计算的容量，不是已验证的输入保证；整组读写还要求行宽为 8 的倍数。
 template <const int BLOCK_SIZE = 256>
 __global__ void softmax_fp16x8_packed_kernel(half *a, half *b, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -210,7 +226,7 @@ __global__ void softmax_fp16x8_packed_kernel(half *a, half *b, int hidden_size) 
 }
 
 //================================================================================================
-// register + smem
+// 寄存器 + 共享内存：在一次全局读取后缓存整行数据。
 template <const int BLOCK_SIZE, const int REG_VECS, const int SMEM_VECS, const int MIN_BLOCKS_PER_SM>
 __global__ __launch_bounds__(BLOCK_SIZE,
                              MIN_BLOCKS_PER_SM) void softmax_onepass_kernel(half *a, half *b, int hidden_size) {
@@ -317,7 +333,7 @@ __global__ __launch_bounds__(BLOCK_SIZE,
     }
 }
 
-// two pass : Vanilla
+// 基础两遍版本：第一遍统计在线 softmax 状态，第二遍重新读取输入并写出结果。
 template <const int BLOCK_SIZE = 256>
 __global__ void softmax_arbitrary_kernel(half *a, half *b, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -366,7 +382,7 @@ __global__ void softmax_arbitrary_kernel(half *a, half *b, int hidden_size) {
     }
 }
 
-// split-k pass 1
+// split-k 第一阶段：多个线程块分别统计同一行不同分片的最大值和指数和。
 template <const int BLOCK_SIZE = 256, const int VECS_PER_THREAD = 16>
 __global__ __launch_bounds__(256, 3) void softmax_grid_pass1(half *a, float *ws_m, float *ws_d, int hidden_size) {
     int row = blockIdx.y;
@@ -412,7 +428,7 @@ __global__ __launch_bounds__(256, 3) void softmax_grid_pass1(half *a, float *ws_
     }
 }
 
-// splitk pass 2
+// split-k 第二阶段：合并整行统计量，各线程块归一化自己负责的分片。
 template <const int BLOCK_SIZE = 256, const int VECS_PER_THREAD = 16>
 __global__ void softmax_grid_pass2(half *a, half *b, float *ws_m, float *ws_d, int hidden_size) {
     int row = blockIdx.y;
@@ -457,6 +473,8 @@ struct Generic {};
 
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 这里按 a 的 dtype 选择核函数，并不验证 b 与 a 的 dtype、形状、设备是否匹配。
+// 各入口均要求调用方遵守对应的缓存容量、行宽倍数和有效输入条件。
 #define binding_func_gen(name, num, element_type)                                                                      \
     void name(torch::Tensor a, torch::Tensor b) {                                                                      \
         CHECK_T(a);                                                                                                    \
@@ -484,6 +502,9 @@ struct Generic {};
             }));                                                                                                       \
     }
 
+// 以下包装直接 reinterpret_cast 为 half*，不会自动转换 FP32/BF16 张量。
+// medium 的容量为 (8+8)*256*8=32768；extreme 为 (32+24)*256*8=114688。
+// smem_bytes 还受 GPU 每块可用共享内存限制；名称不代表任意设备都能运行。
 #define binding_single_launch_gen(name, smem_bytes, ...)                                                               \
     void name(torch::Tensor a, torch::Tensor b) {                                                                      \
         CHECK_T(a);                                                                                                    \
@@ -537,17 +558,17 @@ binding_single_launch_gen(softmax_arbitrary, 0, softmax_arbitrary_kernel<256>);
 binding_splitk_gen(softmax_splitk, softmax_grid_pass1, softmax_grid_pass2);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // register only, one pass, fp32/fp16
+    // 仅用寄存器缓存、一次全局读取的 FP32/FP16 入口；具体 dtype 由各绑定限制。
     torch_pybinding_func(softmax);
     torch_pybinding_func(softmax_fp32x4);
     torch_pybinding_func(softmax_fp16x8_packed);
 
-    // fp16 only
-    // one pass, register + smem
+    // 以下入口按 FP16 数据解释输入输出。
+    // 一次全局读取，使用寄存器与共享内存共同缓存。
     torch_pybinding_func(softmax_medium);
     torch_pybinding_func(softmax_extreme);
 
-    // two pass
+    // 两遍读取版本。
     torch_pybinding_func(softmax_arbitrary);
     torch_pybinding_func(softmax_splitk);
 }

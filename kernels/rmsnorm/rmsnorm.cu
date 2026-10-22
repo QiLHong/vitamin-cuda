@@ -1,3 +1,10 @@
+/*
+ * 中文导读：每行计算 x*weight/sqrt(mean(x²)+eps)，不减去均值。
+ * 输入为 [bs, hidden_size]，权重为 [hidden_size]；输出与输入同形状和 dtype。
+ * 沿用原注释的入门范围 hidden_size<=8192；固定局部数组容量及打包尾部不能由包装自动保护。
+ * FP32x4/FP16x8 需完整的四/八元素组与 16 字节对齐；dtype、设备、权重长度均需调用方保证。
+ * 共享内存版本让同一块跨多行复用权重；性能结论须结合真实硬件和测试条件。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -23,6 +30,8 @@ __device__ __forceinline__ float _warp_shuffle_reduce_sum(float val) {
     return val;
 }
 
+// 先在线程束内求和，再把各线程束的结果放入共享内存，最后广播整块总和。
+// 两次块内屏障分别保护部分和读取以及最终结果读取。
 template <const int num_warp = 8>
 __device__ __forceinline__ float _block_reduce_sum(float val) {
     val = _warp_shuffle_reduce_sum<WARP_SIZE>(val);
@@ -45,7 +54,9 @@ __device__ __forceinline__ float _block_reduce_sum(float val) {
     return sdata[0];
 }
 
-// rmsnorm: a's shape [bs, hidden_size], support hiddensize <= 8192
+// RMSNorm：a 的形状为 [bs, hidden_size]；原实现声明 hidden_size <= 8192。
+// 每线程最多用 WARP_SIZE 个 float 保存数据；原包装固定为 256 线程，未检查行长上限。
+// 平方和在乘权重之前计算，随后把加权输入保存在寄存器中供最终缩放。
 template <const int BLOCK_SIZE = 256, typename T>
 __global__ void rmsnorm_kernel(T *a, T *b, T *c, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -70,7 +81,8 @@ __global__ void rmsnorm_kernel(T *a, T *b, T *c, int hidden_size) {
     }
 }
 
-//  rmsnorm: a's shape [bs, hidden_size], support hiddensize <= 8192
+// RMSNorm：a 的形状为 [bs, hidden_size]；原实现声明 hidden_size <= 8192。
+// 每线程每轮载入四个 FP32，固定数组最多保存八组；仅检查组起点，没有尾部标量处理。
 template <const int BLOCK_SIZE = 256>
 __global__ void rmsnorm_fp32x4_kernel(float *a, float *b, float *c, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -104,7 +116,9 @@ __global__ void rmsnorm_fp32x4_kernel(float *a, float *b, float *c, int hidden_s
     }
 }
 
-//  rmsnorm: a's shape [bs, hidden_size], support hiddensize <= 8192
+// RMSNorm：a 的形状为 [bs, hidden_size]；原实现声明 hidden_size <= 8192。
+// 先把整行权重拷入动态共享内存并同步，再按 row+=gridDim.x 处理多行。
+// 各行输入仍来自全局内存，复用的是权重；不代表每个块处理连续的 16 行。
 template <const int BLOCK_SIZE = 256>
 __global__ void rmsnorm_fp32x4_smem_kernel(float *a, float *b, float *c, int hidden_size, int bs) {
     extern __shared__ float smem_f32[];
@@ -145,7 +159,9 @@ __global__ void rmsnorm_fp32x4_smem_kernel(float *a, float *b, float *c, int hid
     }
 }
 
-//  rmsnorm: a's shape [bs, hidden_size], support hiddensize <= 8192
+// RMSNorm：a 的形状为 [bs, hidden_size]；原实现声明 hidden_size <= 8192。
+// 八个 half 打包加载；平方和用 FP32 累积，但 x*weight 被写回 half2 后才做最终缩放。
+// 因此中间乘权重已经舍入为半精度，不能称为全程 FP32 计算。
 template <const int BLOCK_SIZE = 256>
 __global__ void rmsnorm_fp16x8_packed_kernel(half *a, half *b, half *c, int hidden_size) {
     int row_offset = blockIdx.x * hidden_size;
@@ -185,7 +201,8 @@ __global__ void rmsnorm_fp16x8_packed_kernel(half *a, half *b, half *c, int hidd
     }
 }
 
-//  rmsnorm: a's shape [bs, hidden_size], support hiddensize <= 8192
+// RMSNorm：a 的形状为 [bs, hidden_size]；原实现声明 hidden_size <= 8192。
+// 将半精度权重缓存在动态共享内存中，跨多行复用；加权中间结果仍会舍入回 half2。
 template <const int BLOCK_SIZE = 256>
 __global__ void rmsnorm_fp16x8_packed_smem_kernel(half *a, half *b, half *c, int hidden_size, int bs) {
     extern __shared__ half smem_f16[];
@@ -234,8 +251,11 @@ __global__ void rmsnorm_fp16x8_packed_smem_kernel(half *a, half *b, half *c, int
 
 struct Generic {};
 
+// 这里只验证 CUDA 与连续性，未验证 a 的二维形状、b 的长度、dtype 或同设备关系。
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 普通包装按一块一行启动；输出用 empty_like 分配，必须由核函数完整写入。
+// num 在此包装中未用于限制行长或生成尾部处理。
 #define binding_func_gen(name, num, element_type)                                                                      \
     torch::Tensor name(torch::Tensor a, torch::Tensor b) {                                                             \
         CHECK_T(a);                                                                                                    \
@@ -270,6 +290,8 @@ struct Generic {};
         return out;                                                                                                    \
     }
 
+// 共享内存包装按 ceil(bs/rows_per_block) 启动块，申请 lda*sizeof(CastT) 字节缓存权重。
+// 这里仍未验证行长上限或实际设备可提供的动态共享内存容量。
 #define binding_smem_func_gen(name, rows_per_block, element_type)                                                      \
     torch::Tensor name(torch::Tensor a, torch::Tensor b) {                                                             \
         CHECK_T(a);                                                                                                    \
@@ -311,7 +333,7 @@ binding_func_gen(rmsnorm_fp32x4, 4, float);
 binding_smem_func_gen(rmsnorm_fp32x4_smem, 16, float);
 binding_func_gen(rmsnorm_fp16x8_packed, 8, half);
 binding_smem_func_gen(rmsnorm_fp16x8_packed_smem, 16, half);
-// binding
+// 将各版本的 C++ 包装函数绑定到 Python。
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch_pybinding_func(rmsnorm);

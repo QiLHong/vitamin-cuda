@@ -1,3 +1,6 @@
+# 中文导读：比较不同转置访存策略；输出显式分配为输入的行列互换形状。
+# 当前尺寸都是整齐分块，不能由这些用例推断 packed 版本支持任意非整组尾部。
+# 本次只翻译和补充注释，未执行 CUDA 编译、GPU 正确性或性能测试。
 import numpy as np
 from functools import partial
 from pathlib import Path
@@ -10,7 +13,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 即时编译 CUDA 源文件并加载为 Python 扩展；首次执行需要可用的 CUDA 编译环境。
 lib = load(
     name="transpose_lib",
     sources=[str(current_dir / "transpose.cu")],
@@ -37,6 +40,7 @@ baseline = None
 def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
     global baseline
 
+    # 使用原设置预热、重复计时并启用 cold_l2_cache；不在本次翻译中改变测量条件。
     times = bench_gpu_time(
         fn=op,
         input_args=(a, b),
@@ -46,6 +50,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际统计量是中位数；输出中的英文 mean time 标签按原样保留。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -63,7 +68,7 @@ def diff_check(a, b, prefix="torch", eps=1e-6):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行原有测试尺寸与基准流程。
     device = torch.device("cuda")
     sz = [256, 512, 1024, 2048, 4096, 8192]
     torch.manual_seed(42)

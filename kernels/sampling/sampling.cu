@@ -1,3 +1,13 @@
+/*
+ * 中文导读：先筛 Top-K，再在这些候选上计算 softmax 和 Top-P，最后按截断分布采样。
+ * batched 为每行分配一个线程块；split_k 先把词表分给多个块，再合并各块候选。
+ * 128 位加载一次读取 8 个 16 位元素，只判断起点；要求 vocab_size 为 8 的倍数并满足对齐。
+ * 重要原有限制：虽有 BF16 分派，两个加载核均通过 tmp.h[x] 按 FP16 解码打包内容，
+ * 因而不能把现有 BF16 路径视作已正确支持；这里记录问题，不修改原实现。
+ * 支持的 top_k 以 switch 为准：1、2、4、8、16、20；英文错误消息与实际集合不一致。
+ * 有限有效分数、非空词表、合理 top_p、dtype 和尺寸等前提未得到完整检查。
+ * 本次未进行 GPU 运行、采样分布验证或性能复测。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -13,7 +23,7 @@
 
 #include "../common/pack.cuh"
 
-// stable insertion sort
+// 稳定插入排序：分数降序排列，仅在严格更大时插入；相等分数保留已有候选的先后次序。
 template <const int TOP_K>
 __device__ __forceinline__ bool
 insert_sorted(float (&score)[TOP_K], int (&token_id)[TOP_K], float new_val, int new_id) {
@@ -42,7 +52,7 @@ __global__ void sampling_topk_topp_batched_kernel(
     const int tid = threadIdx.x * 8;
 
     T *row_ptr = logits + batch_id * vocab_size;
-    // step 1: maintain sorted local score/token_id array
+    // 第 1 步：各线程维护局部有序的分数/词元编号数组。
     float score[TOP_K];
     int token_id[TOP_K];
 #pragma unroll
@@ -62,7 +72,7 @@ __global__ void sampling_topk_topp_batched_kernel(
         }
     }
 
-    // step 2: warp reduce merge local array
+    // 第 2 步：在线程束内规约合并各线程的局部候选数组。
     int lane_id = threadIdx.x % 32;
 #pragma unroll
     for (int delta = 16; delta > 0; delta /= 2) {
@@ -77,7 +87,7 @@ __global__ void sampling_topk_topp_batched_kernel(
             }
         }
     }
-    // step 3: final reduce and sampling
+    // 第 3 步：完成线程块内的最终合并，并执行采样。
     const int num_warps = BLOCK_SIZE / WARP_SIZE;
     __shared__ float smem_warp_score[num_warps][TOP_K];
     __shared__ int smem_warp_id[num_warps][TOP_K];
@@ -95,7 +105,7 @@ __global__ void sampling_topk_topp_batched_kernel(
 
     if (threadIdx.x == 0) {
 
-        // block reduce
+        // 线程 0 合并各线程束的 Top-K 候选。
         for (int w = 1; w < num_warps; w++) {
 #pragma unroll
             for (int j = 0; j < TOP_K; ++j) {
@@ -107,7 +117,7 @@ __global__ void sampling_topk_topp_batched_kernel(
             }
         }
 
-        // softmax
+        // 仅对筛出的 Top-K 分数计算 softmax 的未归一化概率。
         float max_val = score[0];
         float sum_prob = 0.0f;
         float probs[TOP_K];
@@ -117,7 +127,7 @@ __global__ void sampling_topk_topp_batched_kernel(
             sum_prob += probs[i];
         }
 
-        // top_p
+        // 在 Top-K 内按降序累计归一化概率，保留累计概率首次达到 top_p 的前缀。
         float cumsum = 0.0f;
         float trunc_sum = 0.0f;
         int last_idx = TOP_K - 1;
@@ -134,13 +144,13 @@ __global__ void sampling_topk_topp_batched_kernel(
         if (trunc_sum == 0.0f)
             trunc_sum = cumsum;
 
-        // curand
+        // 初始化 cuRAND 的 Philox 随机数状态。
         curandStatePhilox4_32_10_t state;
         curand_init(seed, blockIdx.x, offset, &state);
-        float u = curand_uniform(&state); // create a float from (0, 1]
+        float u = curand_uniform(&state); // 生成取值范围为 (0, 1] 的浮点随机数。
         float random_val = 1.f - u;
 
-        // sampling
+        // 根据截断后的概率累计分布选择词元。
         float r = random_val * trunc_sum;
         float cdf = 0.0f;
         int final_id = token_id[last_idx];
@@ -153,12 +163,12 @@ __global__ void sampling_topk_topp_batched_kernel(
             }
         }
 
-        // final token id
+        // 写回最终采样得到的词元编号。
         output_ids[blockIdx.x] = final_id;
     }
 }
 
-// split-k pass 1: partial topk per split
+// split-k 第一阶段：每个词表分片独立选出局部 Top-K。
 template <const int TOP_K = 20, const int CHUNK_SIZE = 2048, const int BLOCK_SIZE = 256, typename T>
 __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_size, float *ws_score, int *ws_id) {
     const int split_id = blockIdx.x;
@@ -171,7 +181,7 @@ __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_siz
 
     T *row_ptr = logits + batch_id * vocab_size;
     int tid = threadIdx.x * 8;
-    // step 1: maintain sorted local score/token_id array
+    // 第 1 步：各线程维护局部有序的分数/词元编号数组。
     float score[TOP_K];
     int token_id[TOP_K];
 #pragma unroll
@@ -190,7 +200,7 @@ __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_siz
             }
         }
     }
-    // step 2: warp reduce merge local array
+    // 第 2 步：在线程束内规约合并各线程的局部候选数组。
     int lane_id = threadIdx.x % 32;
 #pragma unroll
     for (int delta = 16; delta > 0; delta /= 2) {
@@ -203,7 +213,7 @@ __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_siz
             }
         }
     }
-    // step 3: block reduce merge and write to gmem
+    // 第 3 步：在线程块内合并候选，并写入全局内存工作区。
     const int num_warps = BLOCK_SIZE / WARP_SIZE;
     __shared__ float smem_warp_score[num_warps][TOP_K];
     __shared__ int smem_warp_id[num_warps][TOP_K];
@@ -219,7 +229,7 @@ __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_siz
     __syncthreads();
 
     if (threadIdx.x == 0) {
-        // block reduce
+        // 线程 0 合并各线程束的 Top-K 候选。
         for (int w = 1; w < num_warps; w++) {
 #pragma unroll
             for (int j = 0; j < TOP_K; ++j) {
@@ -238,7 +248,7 @@ __global__ void sampling_topk_topp_split_k_pass1_kernel(T *logits, int vocab_siz
     }
 }
 
-// split-k pass 2: merge partial topk and sampling
+// split-k 第二阶段：合并所有分片的 Top-K 候选，再执行采样。
 template <const int TOP_K = 20, const int BLOCK_SIZE = 256>
 __global__ void sampling_topk_topp_split_k_pass2_kernel(
     int *output_ids, float top_p, int64_t seed, int64_t offset, int num_splits, float *ws_score, int *ws_id) {
@@ -258,7 +268,7 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
         insert_sorted<TOP_K>(score, token_id, ws_score[ws_base + idx], ws_id[ws_base + idx]);
     }
 
-    // warp reduce merge
+    // 在线程束内规约合并候选。
     int lane_id = threadIdx.x % 32;
 #pragma unroll
     for (int delta = 16; delta > 0; delta /= 2) {
@@ -288,7 +298,7 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
 
     if (threadIdx.x == 0) {
 
-        // block reduce
+        // 线程 0 合并各线程束的 Top-K 候选。
         for (int w = 1; w < num_warps; w++) {
 #pragma unroll
             for (int j = 0; j < TOP_K; ++j) {
@@ -300,7 +310,7 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
             }
         }
 
-        // softmax
+        // 仅对筛出的 Top-K 分数计算 softmax 的未归一化概率。
         float max_val = score[0];
         float sum_prob = 0.0f;
         float probs[TOP_K];
@@ -310,7 +320,7 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
             sum_prob += probs[i];
         }
 
-        // top_p
+        // 在 Top-K 内按降序累计归一化概率，保留累计概率首次达到 top_p 的前缀。
         float cumsum = 0.0f;
         float trunc_sum = 0.0f;
         int last_idx = TOP_K - 1;
@@ -326,13 +336,13 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
         if (trunc_sum == 0.0f)
             trunc_sum = cumsum;
 
-        // curand
+        // 初始化 cuRAND 的 Philox 随机数状态。
         curandStatePhilox4_32_10_t state;
         curand_init(seed, batch_id, offset, &state);
         float u = curand_uniform(&state);
         float random_val = 1.f - u;
 
-        // sampling
+        // 根据截断后的概率累计分布选择词元。
         float r = random_val * trunc_sum;
         float cdf = 0.0f;
         int final_id = token_id[last_idx];
@@ -344,13 +354,15 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
             }
         }
 
-        // final token id
+        // 写回最终采样得到的词元编号。
         output_ids[batch_id] = final_id;
     }
 }
 
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 这里只对 FP16/BF16 分派，其他 dtype 没有报错分支，可能返回尚未写入的 res。
+// BF16 的位模式解码限制见文件开头；调用方不能仅凭存在分派分支认定结果正确。
 #define DISPATCH_TOPK_KERNEL(kernel_name, K_VAL)                                                                       \
     if (logits.dtype() == torch::kHalf) {                                                                              \
         kernel_name<K_VAL, chunk_size>                                                                                 \
@@ -425,6 +437,8 @@ __global__ void sampling_topk_topp_split_k_pass2_kernel(
                                                           ws_id.data_ptr<int>());                                      \
     }
 
+// num_splits 固定为 26；它改变并行划分，不等同于运行时查询 SM 数量。
+// 工作区存放各词表分片的 top_k 个分数与编号，同一流上的第二阶段继续合并。
 torch::Tensor sampling_topk_topp_split_k(torch::Tensor logits, int top_k, float top_p, int64_t seed, int64_t offset) {
     CHECK_T(logits);
     const int bs = logits.size(0);

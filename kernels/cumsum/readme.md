@@ -1,26 +1,50 @@
-# cumsum
+# cumsum：累积和
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-cumsum kernels.
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
 
-- [x] naive Torch cumsum
+## 概述
+
+沿最后一维计算累积和（前缀和）的核函数。
+
+- [x] 朴素 Torch 累积和基准
 - [x] cumsum — FP32
 - [x] cumsum — FP32x4
-- [x] cumsum — FP32x4 split-k
-- [ ] cumsum — FP32x4 multi-CTA scan
+- [x] cumsum — FP32x4，按行内分块拆分计算（split-k）
+- [ ] cumsum — FP32x4，多个线程块协作的扫描（multi-CTA scan）
 - [x] cumsum — BF16
-- [x] cumsum — BF16x8 packed
-- [x] pytorch op bindings && diff check
+- [x] cumsum — BF16x8，打包读写
+- [x] PyTorch 算子绑定与结果差异检查
 
-## Run tests
+## 中文导读与适用范围
+
+输入 `a` 与输出 `b` 按连续二维张量 `[bs, n]` 解释，计算包含当前位置的前缀和：`b[row, j] = sum(a[row, 0:j+1])`。普通版本一个线程块处理一行：先做线程内和线程束内扫描，再扫描各线程束的总和；`delta` 把前一段的累计结果传给下一段。BF16 版本先转为 FP32 累加，写出时再舍入到 BF16。
+
+| 版本 | 每线程负责元素数 | 读源码时的重点 |
+| --- | --- | --- |
+| `cumsum_fp32`、`cumsum_bf16` | 1 | 标量访问逐元素检查 `col < n` |
+| `cumsum_fp32x4` | 4 | 先在寄存器中扫描四个元素，再跨线程合并 |
+| `cumsum_bf16x8_packed` | 8 | 用 128 位访问搬运八个 BF16，FP32 中间结果用于扫描 |
+| `cumsum_fp32x4_split_k` | 4 | 第一轮写分块前缀和及块总和，第二轮补上此前各块的总和 |
+| `cumsum_fp32x4_multi_cta_scan` | — | 当前核函数体为空，属于待实现入口，不可作为可用结果 |
+
+向量版本仅检查整组的起点，未逐元素保护末尾：FP32x4 应使用 `n` 为 4 的正整数倍，BF16x8 应使用 `n` 为 8 的正整数倍，且打包地址需满足 16 字节对齐。包装只检查 CUDA 与连续性，未完整核对维数、dtype、输出形状及设备关系；应由调用方保证输入输出一致。空行、超大尺寸和任意非整组尾部没有在本次翻译中修复。
+
+split-k 的两个核函数在同一 CUDA 流中依次启动，第二轮依赖第一轮完成；线程块之间没有靠块内屏障同步。第二轮会对当前块之前的块总和重新求和，不能仅凭拆分名称推断它对所有行长都更快。
+
+## 运行测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
+
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
 
 ```bash
 ####################################################################################################

@@ -14,6 +14,8 @@
 
 #include "cublas_v2.h"
 
+// cuBLAS 以列主序解释矩阵：交换 A/B 与 M/N，借助 C^T=B^T A^T 计算行主序结果。
+// alpha=1、beta=0 表示覆盖 C；输入输出为 FP16/BF16，计算类型为 FP32。
 void cublas_hgemm(void *A, void *B, void *C, size_t M, size_t N, size_t K, bool use_bf16 = false) {
     cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
     static float alpha = 1.0;
@@ -40,6 +42,8 @@ void cublas_hgemm(void *A, void *B, void *C, size_t M, size_t N, size_t K, bool 
                  CUBLAS_GEMM_DEFAULT);
 }
 
+// 包装只检查 CUDA 与连续性；调用方仍须保证尺寸、dtype、同设备和输出容量匹配。
+// 原实现将所有非 FP16 输入都当作 BF16，不是任意 dtype 的自动转换。
 void hgemm_cublas(torch::Tensor a, torch::Tensor b, torch::Tensor c) {
     TORCH_CHECK(a.is_cuda() && b.is_cuda() && c.is_cuda(), "All tensors must be on CUDA");
     TORCH_CHECK(a.is_contiguous(), "Tensor A must be contiguous");

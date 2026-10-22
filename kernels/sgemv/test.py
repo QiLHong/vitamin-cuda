@@ -10,7 +10,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="gemv_lib",
     sources=[str(current_dir / "sgemv.cu")],
@@ -31,6 +31,8 @@ lib = load(
 baseline = None
 
 
+# FlashInfer 返回一组耗时；此处启用冷 L2、关闭 CUDA Graph，最终统计中位数。
+# 保留原 mean time 日志标签，它不改变下面实际调用 np.median 的事实。
 def benchmark(op, a, b, c=None, warmup=10, rep=100, prefix="torch"):
     input_args = (a, b, c) if c is not None else (a, b)
 
@@ -61,14 +63,14 @@ def diff_check(a, b, prefix="torch", eps=1e-4):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 测试各核函数。
     nm = [512, 1024, 2048, 4096, 8192]
     torch.manual_seed(42)
     for n in nm:
         for m in nm:
             print("#" * 100)
             print(f"n: {n}, m: {m}")
-            # a dot b = c
+            # 矩阵—向量乘法：a 的各行与 b 做点积，结果写入 c。
             a = torch.randn(n, m).float().cuda()
             b = torch.randn(m, 1).float().cuda()
             c = torch.zeros(n, 1).cuda()

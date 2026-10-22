@@ -1,3 +1,4 @@
+# 中文导读：本脚本保留上游基准与误差检查设置；导入时会触发 CUDA 扩展编译。
 import numpy as np
 from functools import partial
 from pathlib import Path
@@ -11,7 +12,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源文件即时编译并加载为 Python 模块；首次运行需要本机 CUDA 工具链。
 lib = load(
     name="gelu_lib",
     sources=[str(current_dir / "gelu.cu")],
@@ -33,6 +34,7 @@ lib = load(
 def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
     input_args = (a, b) if b is not None else (a,)
 
+    # 计时器预热后重复测量，并请求冷 L2；加速比为先前 torch 基准耗时/当前耗时。
     times = bench_gpu_time(
         fn=op,
         input_args=input_args,
@@ -42,6 +44,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际取中位数；原日志写 mean time，翻译不改变该可观察字符串。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -53,13 +56,14 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         print(f"{prefix:30s} mean time: {avg_duration:8.6f} ms, speedup: {speedup:.2f}")
 
 
+# 检查最大绝对误差；不覆盖 NaN/Inf、极端分布、所有形状或所有设备架构。
 def diff_check(a, b, prefix="torch", eps=1e-5):
     message = f"{prefix} result diff"
     assert torch.max(torch.abs(a - b)).item() < eps, message
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 遍历原始大尺寸测试输入；这些尺寸覆盖整组访存，不代表已经验证任意尾部。
     device = torch.device("cuda")
     sz = [1024, 2048, 4096]
     torch.manual_seed(42)
@@ -70,6 +74,7 @@ if __name__ == "__main__":
             a = torch.randn(n, m).float().cuda()
             b = a.clone()
 
+            # PyTorch 返回新输出，自定义核写预分配 b_my；需区分分配开销与核函数耗时。
             benchmark(F.gelu, b)
             b_my = torch.empty_like(a)
 
@@ -80,7 +85,7 @@ if __name__ == "__main__":
             b = torch.nn.functional.gelu(a)
             diff_check(b, b_my, prefix="gelu_fp32x4")
 
-            ################### half
+            # 半精度测试：保留上游各版本独立设置的误差阈值。
             a = a.half()
             b = a.clone()
             benchmark(F.gelu, b)

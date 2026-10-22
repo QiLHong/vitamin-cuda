@@ -1,3 +1,6 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 当前正余弦缓存只预建 head_dim=128/256、位置 0..8191；更大位置或其他维度需另行设计。
+# rope() 中现算的 cos/sin 随后被全局缓存覆盖，这是原实现的行为。
 from functools import partial
 from pathlib import Path
 
@@ -10,7 +13,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="rope_lib",
     sources=[str(current_dir / "rope_neox.cu")],
@@ -65,11 +68,11 @@ def apply_rotary_pos_emb(q, cos, sin):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     return q_embed
 #@torch.compile()
-def rope_with_sin_cos_cache(q):  # q shape: [bs, seqlen, head_dim]
+def rope_with_sin_cos_cache(q):  # q 的形状：[bs, seqlen, head_dim]。
     # inv_freq = compute_default_rope_parameters(q.shape[-1])
     # position_ids = torch.arange(q.shape[1], device=q.device).float()
 
-    # # [seq_len] outer [dim/2] -> [seq_len, dim/2]
+    # # 位置与逆频率做外积：[seq_len] × [dim/2] -> [seq_len, dim/2]。
     # freqs = torch.outer(position_ids, inv_freq)
 
     # # [seq_len, dim/2] -> [seq_len, dim]
@@ -81,13 +84,13 @@ def rope_with_sin_cos_cache(q):  # q shape: [bs, seqlen, head_dim]
 
     return apply_rotary_pos_emb(q, cos, sin)
 
-# neo-x stype rope, single head single batch
+# NeoX 风格的 RoPE；当前函数处理 [bs, seqlen, head_dim]，原注释的“单 batch”描述不准确。
 #@torch.compile()
-def rope(q):  # q shape: [bs, seqlen, head_dim]
+def rope(q):  # q 的形状：[bs, seqlen, head_dim]。
     inv_freq = compute_default_rope_parameters(q.shape[-1])
     position_ids = torch.arange(q.shape[1], device=q.device).float()
 
-    # [seq_len] outer [dim/2] -> [seq_len, dim/2]
+    # 位置与逆频率做外积：[seq_len] × [dim/2] -> [seq_len, dim/2]。
     freqs = torch.outer(position_ids, inv_freq)
 
     # [seq_len, dim/2] -> [seq_len, dim]
@@ -115,6 +118,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 这里统计的是中位数；原有输出字符串仍写 mean time，翻译不修改运行日志。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -134,7 +138,7 @@ def diff_check(a, b, prefix="torch", eps=1e-4):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行下面列出的核函数测试配置。
     device = torch.device("cuda")
     batch_sizes = [64, 128,]
     seq_lens = [512, 1024, 2048, 4096, 8192]

@@ -1,52 +1,1144 @@
 {
+  "schema_version": 2,
   "base_commit": "ca40342f985a95be615585e02c130e13040f0e02",
-  "branch": "zh-cn-beginner",
-  "scope": "静态源码一致性检查；不是编译或 GPU 运行结果",
+  "continuation_base_commit": "520f97093a2abc239977be83d244b327d0e2e2ef",
+  "target_branch": "zh-cn-beginner",
+  "work_branch": "docs/zh-cn-complete-20261022",
+  "verified_on": "2026-10-22",
+  "timezone": "Asia/Shanghai",
+  "scope": "当前基线源码的静态一致性核查与翻译覆盖；不是编译、GPU 运行或性能验证",
   "cuda_compilation_performed": false,
   "gpu_runtime_tests_performed": false,
   "performance_tests_performed": false,
+  "compute_sanitizer_performed": false,
+  "summary": {
+    "source_files_verified_against_original": 85,
+    "source_files_changed_in_this_round": 78,
+    "previously_translated_source_files_reverified": 7,
+    "english_original_snapshots_verified": 31,
+    "english_original_snapshots_added": 27,
+    "changed_markdown_files_with_original_fences_checked": 32,
+    "changed_or_new_chinese_markdown_files_with_relative_links_checked": 33,
+    "relative_file_links_checked": 203,
+    "protected_original_files_unchanged": 32,
+    "errors": 0
+  },
+  "method_notes": [
+    "C++/CUDA 在处理反斜杠续行后去除普通注释，保留普通/原始字符串，再比较词法 token；另比较预处理逻辑行及函数式宏标记。",
+    "Python 比较不含源码位置属性的 AST，以及去除普通注释后的 token；不执行模块导入或 CUDA 扩展编译。",
+    "Shell/CMake 比较去除普通注释后的命令/配置行；本仓库相关脚本不含 heredoc 或 CMake bracket 字符串。",
+    "全部英文原样副本与最初翻译基线的对应原文件按字节比较；27 个本轮新副本也与续译基线比较。",
+    "本轮已有 Markdown 中的原始代码/命令/日志围栏块保持原有内容与顺序；可在围栏外增加译注和新示例。",
+    "本轮变更的中文 Markdown 检查相对文件链接目标存在；不声称外部网站或片段锚点全部验证。",
+    "git diff --check 排除原样英文副本；这些副本可能保留上游历史空白，逐字节保留优先于重新格式化。",
+    "这些是静态一致性检查，不是编译器语义证明；注释引入的行号与调试信息变化不作二进制一致保证。"
+  ],
   "checks": [
+    {
+      "path": "infer/torch/overlap_infer/dual_stream_infer.py",
+      "original_blob": "0ddcf91e7b22a6f2097fb8657c08c5b5ddeb8b83",
+      "annotated_blob": "f559bd6d68b6771d2ed58667a097d3ea4087e79d",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "infer/torch/torch_dist/test.py",
+      "original_blob": "37c83aec6bc3f037d086f86b0ff34083be46ac7d",
+      "annotated_blob": "7d0ea86642d9dc8aa064f32a2a56e62e0617798c",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
     {
       "path": "kernels/common/pack.cuh",
       "original_blob": "31e4ad03da93ca1c68b5f807b86f478620fa3513",
       "annotated_blob": "bb85aab2933b12f383375ae57a2f5d95809934c8",
-      "check": "去除普通注释和空白后的 C++ 词法序列一致，保留预处理指令"
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/cumsum/cumsum.cu",
+      "original_blob": "fc8bf347b363363201aecfdffd5e78d0299476b6",
+      "annotated_blob": "1ee7531fb1aa3eadb544fc215f1291405ef351ac",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/cumsum/test.py",
+      "original_blob": "9a5ead6c2a38f2b60b9ca39ff4ac1dc89fc446f2",
+      "annotated_blob": "f2e1d227e2b48dcefee9bc5f884a51482ee10c4c",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/dot_product/dot_product.cu",
+      "original_blob": "1fa0342618535cd984a48ef866b91b80b9c0aaa6",
+      "annotated_blob": "b679bd0a6b0797ca5c91be4a96a0a7c6dd656303",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/dot_product/test.py",
+      "original_blob": "4c7e31bb2a5679447cf82ed676cdcaf971b84bd6",
+      "annotated_blob": "7a0cb04a3d405651250a3374dd01dac2bc4c536b",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
     },
     {
       "path": "kernels/elementwise/elementwise.cu",
       "original_blob": "e6853d56d781253a94425fe6d78cdd8428978a75",
       "annotated_blob": "0a1685f6729598faa7f22560a1edfcd126141153",
-      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
     },
     {
       "path": "kernels/elementwise/test.py",
       "original_blob": "b1a0bdfb29d2489d1b17330b708b9bb82e9815db",
       "annotated_blob": "751c43448ce1f79dc79b3c0bb79d3769aba0b9f3",
-      "check": "Python AST 一致（不比较源码位置属性）"
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/elu/elu.cu",
+      "original_blob": "85ae1916eda98af35c520c37e84f39a4c7a80e47",
+      "annotated_blob": "bbbedfd5f3ae783277a9e508108a7885a46064be",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/elu/test.py",
+      "original_blob": "70fbb9178630331b7eaa926e3dc0c3380d5f1551",
+      "annotated_blob": "9249e20594e693effb39106ab16ff27525e0b0d9",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/embedding/embedding.cu",
+      "original_blob": "1211bebeb4bc0817f044cfe58263c34feb0b012a",
+      "annotated_blob": "4276d00fa5ef27af7e518eb49aa52d91567a5cfd",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/embedding/test.py",
+      "original_blob": "9bdaab6af6927939efcb4178b797f1cf3ff13a8a",
+      "annotated_blob": "5e19e5f933691a6679d39839e659e0195f79e7d9",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_attn/flash_attn.cu",
+      "original_blob": "904250490c362894eae913bdf7bbeb4856a02918",
+      "annotated_blob": "c9e21561f3de432e4bb66ee5ee0da54508344ddd",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_attn/run_ncu.sh",
+      "original_blob": "9ca2ebb17688b2a955d05c3c331bbc11bb69143f",
+      "annotated_blob": "f3b53c92db72a0c902653b4efa96faffd1c1d4db",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_attn/test.py",
+      "original_blob": "6c9b94fc1999c69caa77a1948677062513aa655a",
+      "annotated_blob": "8049cbf4b1aee4e4a53b5e0381a96e15292cd344",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_attn/test_for_ncu.py",
+      "original_blob": "53f53932c4940b1830cc7e311d4e71f4bdee3501",
+      "annotated_blob": "af73a8c267aed18aee17d8974b928cc634b1dd4e",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_decode/flash_decode.cu",
+      "original_blob": "b0e79c25f98fe1e3eae71b2333106e1d96ba7c1d",
+      "annotated_blob": "9259efc00bb2d34bf5f70514247677d3aa34ed97",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_decode/run_ncu.sh",
+      "original_blob": "37dee44238ff36ac38bfc66bb62401f79ac9309d",
+      "annotated_blob": "1d2e020c1b72e8fa86294ec894385af2731669ae",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_decode/test.py",
+      "original_blob": "34f1815a59579fe5ec0bf069d849c30e083d9a23",
+      "annotated_blob": "b92d0ecae84c4ff2bc4a8e1945d380bc7ba1eea2",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/flash_decode/test_for_ncu.py",
+      "original_blob": "300b834bfd3f639d0230ccd84d03b4261fa8cb0d",
+      "annotated_blob": "310071189eb9385b9a14d242fd0f70dfb3c5aac8",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/gelu/gelu.cu",
+      "original_blob": "b350280492128c1e7e129445e650672b82b6ce9b",
+      "annotated_blob": "0093a19a36bddcfa38af064276f9d68950f03be9",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/gelu/test.py",
+      "original_blob": "2dbf7031edaa56a3e9cec96259d1fe69cd8d7541",
+      "annotated_blob": "6edaa09310bbc89097219478dacc1961bce87f0a",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/hardswish/hardswish.cu",
+      "original_blob": "9e8ea8039290c6881bef6c96a3bb166a9c92ac1a",
+      "annotated_blob": "23924459f4ce03037627f10dfc3ff0a6ed5a1a86",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hardswish/test.py",
+      "original_blob": "0ebf8dd561ed223ee7d793ef8f00ee605db2ef35",
+      "annotated_blob": "7ed70953c7e371697975fc526e845dc5073f831a",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm/cublas.cu",
+      "original_blob": "11c0a21e736cdf73405671a1c309cf3f71b6e10e",
+      "annotated_blob": "e7a354f434154f990ff6d4ca5f1c907557b4509c",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm/hgemm.cu",
+      "original_blob": "58a27661347fb395a788843ca268ef34a1f01349",
+      "annotated_blob": "d88b7d2394147391b8761d38ca0e61ddb6d15020",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm/run_ncu.sh",
+      "original_blob": "964ab1c46f0e773529231395ac83c5afee56f657",
+      "annotated_blob": "f007012dcf9e96b5d76c6c696ec1b4e8e5c10a9f",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm/test.py",
+      "original_blob": "9a735c34562651b576afbb6a0df778100eed7a42",
+      "annotated_blob": "e52c366b08e096e0fdb6fbc49583a318caa961d3",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm/test_for_ncu.py",
+      "original_blob": "065855488e3649fc423ce39c3845df11210d8652",
+      "annotated_blob": "3faedf7c3ede8ed1151a97947aa82b45d6675c94",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/cublas.cu",
+      "original_blob": "11c0a21e736cdf73405671a1c309cf3f71b6e10e",
+      "annotated_blob": "e7a354f434154f990ff6d4ca5f1c907557b4509c",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/hgemm_sm120.cu",
+      "original_blob": "7b87c406927f88858e7da82cd1e7ada92786ddd7",
+      "annotated_blob": "363f513e90cd4be9b7a2020df6569fd6ec40386a",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/run_ncu.sh",
+      "original_blob": "964ab1c46f0e773529231395ac83c5afee56f657",
+      "annotated_blob": "f007012dcf9e96b5d76c6c696ec1b4e8e5c10a9f",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/test.py",
+      "original_blob": "f0e6f3586c394c7913e87a5c7b56c25c37a1bfd4",
+      "annotated_blob": "f347e8495cc2ca7dac265a7bd69f8d4d6c5ec389",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/test_for_ncu.py",
+      "original_blob": "ef8801539b1f83567f1df10dd876dccb2c195315",
+      "annotated_blob": "26bfd28316bfb9a3fe022cb8469583a7e990f372",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/mat_transpose/run_ncu.sh",
+      "original_blob": "ce16fb23812904e81004d3bdcd3e73734c4853c2",
+      "annotated_blob": "2be52fd8c148042ceafb9c02a4c8af655e1bbabe",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/mat_transpose/test.py",
+      "original_blob": "4f305e8c71a4202a38ec4f4cd309c67cb372b81e",
+      "annotated_blob": "0032c3c1bca89e7939ce3109b10cf57e031451b8",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/mat_transpose/transpose.cu",
+      "original_blob": "25d35b95dfdd8d065c918ff7e4775df7d4a596b0",
+      "annotated_blob": "fa583ccca5fc67bba272eec55b599a174c0143a0",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/normalization/norm.cu",
+      "original_blob": "f868a4edb571511c3c51395409a29516aa99a986",
+      "annotated_blob": "fccb643606aab8cbd5c9e171cbc146d867aee5d4",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/normalization/test.py",
+      "original_blob": "a76ae3a583976adad9b0c01c609a3e07a3851e55",
+      "annotated_blob": "efe832f43d0a20df539cc8d9d3d29156f4f8f570",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/reduce/reduce_sum.cu",
+      "original_blob": "ec75265f5b77df804e8e35262b0a6b41020a1e77",
+      "annotated_blob": "32a75c49b055d9967c4b6b0ba58d946f18ec56b4",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/reduce/test.py",
+      "original_blob": "3cc69e629d25581dbbbadcb13b026b4d93123d7f",
+      "annotated_blob": "9f1c820a38b626a72616b83d4126b6391306736c",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
     },
     {
       "path": "kernels/relu/relu.cu",
       "original_blob": "a9915126fec74a538c7586eaebb10306e43fba1f",
       "annotated_blob": "50c502863e1b45e48e5f737d2d6eed134e3c0508",
-      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
     },
     {
       "path": "kernels/relu/test.py",
       "original_blob": "50be8eeecce88b167551392d528a6d08884c85e1",
       "annotated_blob": "d132961d6afa843df336230453760343c79bfc14",
-      "check": "Python AST 一致（不比较源码位置属性）"
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/relu6/relu6.cu",
+      "original_blob": "c9a1f009b9df20be9c7b8fdf9602c9768c3fc7fc",
+      "annotated_blob": "9686c6dcdaa927d1b22075d2e2d063f2994494e3",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/relu6/test.py",
+      "original_blob": "0d0b70c12949a03ffd45ab91d571c4a789c43921",
+      "annotated_blob": "042dd3f20a7bdf041cf35de1771ec64fbebb7705",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/rmsnorm/rmsnorm.cu",
+      "original_blob": "1b7b5b7829d5f1920b05a8fd278c13655f60c533",
+      "annotated_blob": "220b0ff770efbcddc193bf7e410f974b0b418064",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/rmsnorm/test.py",
+      "original_blob": "9f058deb516594dad488d5779eb206bdb16abe6d",
+      "annotated_blob": "8fe7b8919b0b74813095b112d845b3367a9ff194",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/rope/rope_neox.cu",
+      "original_blob": "c808fd971cf1045b7ce748d4c763869787a3eadf",
+      "annotated_blob": "6d9a0d6491eae75a9c30b4c24868e0dbf1038a20",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/rope/run_ncu.sh",
+      "original_blob": "1b2bf28511b82db91e25c73191b3ec1291fca0e5",
+      "annotated_blob": "40ff27534418c3fa9332603f544cd7aa211a8bcf",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/rope/test.py",
+      "original_blob": "3494a70cc3bf538313afae636a845bd102acc642",
+      "annotated_blob": "bba8cfef59d67858578ba7e4b0b38cef82ee3647",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/rope/test_for_ncu.py",
+      "original_blob": "93fc30f6feb1421f4af83114742654ec3ec7d30a",
+      "annotated_blob": "1a8e797d600d7f78faadabbe3b025f8a4a4ed1df",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sampling/sampling.cu",
+      "original_blob": "8952076b1a61f0e24cb31aafd27d1e55f6c47fdc",
+      "annotated_blob": "0a2d5ac0881303b0d194a177675963dc9cac1fe1",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sampling/test.py",
+      "original_blob": "6b73b412b1de17712e989905bb9015f5e958af62",
+      "annotated_blob": "3d227b662387adb2fa4037555fe8d43f982478f1",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sampling/test_with_cold_l2.py",
+      "original_blob": "8e120a9342c7f0a150fdd8fd5654866212d43603",
+      "annotated_blob": "17fd300fc0dcabe8bd171f80c140aa46d148af48",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/cublas.cu",
+      "original_blob": "da13519117f98062ae4363deade45e709be6552c",
+      "annotated_blob": "fa3fcad0e9c09619f56186f77f7c8dd37e25bfe1",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/run_ncu.sh",
+      "original_blob": "964ab1c46f0e773529231395ac83c5afee56f657",
+      "annotated_blob": "f007012dcf9e96b5d76c6c696ec1b4e8e5c10a9f",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/sgemm.cu",
+      "original_blob": "9129ebaeaaa47450cc86047c1591127415c99761",
+      "annotated_blob": "401c02419ec4ac8f249597f9d77fedcf9af892d1",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/sgemm_tf32.cu",
+      "original_blob": "6c1730f14cd4904daba0f6813aaeef43ec26af81",
+      "annotated_blob": "a0e0ab345c7015437309f45c87852061e829fd23",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/test.py",
+      "original_blob": "abcf53348dec368fe501accdfd1a45fcf6d9dd6b",
+      "annotated_blob": "196f5df797935fb4bc2662f2b27dc768bd17e125",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemm/test_for_ncu.py",
+      "original_blob": "e898b546fdc1750c4431a78d7812bdc0445e8933",
+      "annotated_blob": "987e2c6853d1222bc494089255741e2698d79682",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemv/sgemv.cu",
+      "original_blob": "dd03f9ba282a9ccddd6bca2110cd30d2fdf2dbc7",
+      "annotated_blob": "e9d85825781eed255bd3491a0bcea2b7d028f60a",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sgemv/test.py",
+      "original_blob": "e2ee20614a0b61dfdc01dd8110e23bd5deffadf1",
+      "annotated_blob": "b8c4da5b82cf49eafc75c46f80e4338cf296dee9",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
     },
     {
       "path": "kernels/sigmoid/sigmoid.cu",
       "original_blob": "a5a6c11fb7365fb981ef7c978bf0f656f4afe6db",
       "annotated_blob": "0a03f1a041bc0d0517189090368f163dfd88cc78",
-      "check": "去除普通注释和空白后的 CUDA/C++ 词法序列一致，保留预处理指令"
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
     },
     {
       "path": "kernels/sigmoid/test.py",
       "original_blob": "6fc8b912dee9a010ec359d08bdd2d9cbe525000e",
       "annotated_blob": "0eb53635e359b9599804a9899dbd1a5d69ce38eb",
-      "check": "Python AST 一致（不比较源码位置属性）"
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/silu/silu.cu",
+      "original_blob": "32c5af831b73b1633b3d07fbf25e54516a380762",
+      "annotated_blob": "c933fa705ce19707fd12ccbf5d686a600876130c",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/silu/test.py",
+      "original_blob": "2c75dba8d83843d399ce4e177cf9f622e35e9621",
+      "annotated_blob": "20c33a9594219c5db96d472250b9fbe653bc4761",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/softmax/run_ncu.sh",
+      "original_blob": "ca7df953f10728d71a85b86fb5d824e508c0fe3c",
+      "annotated_blob": "c2c65aae443f8e1ec251f46c1eef1a15b56e9978",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/softmax/softmax.cu",
+      "original_blob": "265bf60fb12dde9e28dcc928b080a5dc54b7c103",
+      "annotated_blob": "ae25a0f14c644142248433e3e2827d262e98ac27",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/softmax/test.py",
+      "original_blob": "62c27900feb53d95c485fc6616e13787d25f20d4",
+      "annotated_blob": "e6adc65a2bded9f6aed4245dd5fe23201a7025af",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/softmax/test_for_ncu.py",
+      "original_blob": "7555c5f6e7d97c4295cf37698e1937ca2fae05e9",
+      "annotated_blob": "3c7a442f9a09666de931d1b0347548105713245c",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels/sort/cub_sort.cu",
+      "original_blob": "260444e1bf2e2636014c14f07a0fbeb75fb0a2ab",
+      "annotated_blob": "66615dee631c01b52ec348c8dddf4de60ec27b8b",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sort/sort.cu",
+      "original_blob": "ff89378b12355bea7f91a81204ac8f2f9963ed4d",
+      "annotated_blob": "059531e3a0046cc098a351e30831eb5acbc712c5",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "kernels/sort/test.py",
+      "original_blob": "a0ead334c154d452d890c50e5ea43fe3ec06e2d6",
+      "annotated_blob": "2822b8adc0a4a907d5aad59f6c3a71711745a0e1",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/softmax/test.py",
+      "original_blob": "80641af657d075780a6076d804f8e448bad7dbc3",
+      "annotated_blob": "414436b9650489e2058517ceeba140b89e5a0b32",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/vector_add/test.py",
+      "original_blob": "7dc7f3d1b81869ba7b7c3ac361cbe3e20e48670b",
+      "annotated_blob": "722d807f872b43a12603dfe5d959da731a66d6d0",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "kernels_dsl/triton/vector_add/test.py",
+      "original_blob": "7a73cf20a661a5ddea6a40d06dd2b05fb274eaeb",
+      "annotated_blob": "27e204e9bfb165ff56cf6cfacead0932a56d3d3f",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/run_ncu.sh",
+      "original_blob": "3a1c1eed3f0bdaf9b22310a53831341249048d6e",
+      "annotated_blob": "ba021889488999b72566ba9c87be6c2520613947",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/test.cu",
+      "original_blob": "cc6d7c9c03fd61f7b0930deb5755e61e450e529d",
+      "annotated_blob": "09a273bb9618e49151613dafbeac7d0d8d686222",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/test_for_ncu.py",
+      "original_blob": "b3e5e324b4037059a803b59e26528ac1138ba4fe",
+      "annotated_blob": "c513b8c7dcc13a6f5aebdfaf4cb80583518279cc",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    },
+    {
+      "path": "samples/deviceQuery/CMakeLists.txt",
+      "original_blob": "c09550ec68bbb6d9f12305dcc677c2567f7fc520",
+      "annotated_blob": "251add952f1091841b77560d1dd0ce93b81ae552",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "samples/deviceQuery/deviceQuery.cpp",
+      "original_blob": "6a8279ba2530aedc5f9160e315ee573e84fbb2df",
+      "annotated_blob": "d87c600f5b84634859e13ee5d2f5d8e4106ffd0d",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "samples/deviceQuery/run.sh",
+      "original_blob": "a3db928e523460058638dc914bfe1c79574ed868",
+      "annotated_blob": "032a1b22549476d25415a2693f425f6705c0eddd",
+      "check": "Shell/CMake 去除普通注释后的命令/配置行一致",
+      "passed": true
+    },
+    {
+      "path": "samples/local_memory/test.cu",
+      "original_blob": "942f0bc05ea15cd1e5b06e37e4ad17ee8de61015",
+      "annotated_blob": "8939a044e2c2b0c05a64fdcf5f102e4dc1b14397",
+      "check": "去除普通注释后的 CUDA/C++ 词法 token、字符串字面量、预处理逻辑指令与函数式宏标记一致",
+      "passed": true
+    },
+    {
+      "path": "samples/local_memory/test.py",
+      "original_blob": "da15b42071a8e247b15927acbd13964d67a312b7",
+      "annotated_blob": "a5d1c42a9c9b40ecef84b95887d801a282a639f7",
+      "check": "Python AST 与非注释 token 一致；字符串和 docstring 保留，不比较源码位置属性",
+      "passed": true
+    }
+  ],
+  "english_snapshots": [
+    {
+      "path": "README.en.md",
+      "source_path": "README.md",
+      "original_blob": "ac7bbf37ab6faa9ac8efb0bd621dbb0209b54b3b",
+      "snapshot_blob": "ac7bbf37ab6faa9ac8efb0bd621dbb0209b54b3b",
+      "identical": true
+    },
+    {
+      "path": "infer/torch/torch_dist/readme.en.md",
+      "source_path": "infer/torch/torch_dist/readme.md",
+      "original_blob": "aba9c3620496394ff3382e7b3123ee8e1afb09a6",
+      "snapshot_blob": "aba9c3620496394ff3382e7b3123ee8e1afb09a6",
+      "identical": true
+    },
+    {
+      "path": "kernels/cumsum/readme.en.md",
+      "source_path": "kernels/cumsum/readme.md",
+      "original_blob": "a10fcac68d59397d8aac85d82eae228998cbab03",
+      "snapshot_blob": "a10fcac68d59397d8aac85d82eae228998cbab03",
+      "identical": true
+    },
+    {
+      "path": "kernels/dot_product/readme.en.md",
+      "source_path": "kernels/dot_product/readme.md",
+      "original_blob": "39ac5e9d4e869c450b9175a57b685bccf92c196c",
+      "snapshot_blob": "39ac5e9d4e869c450b9175a57b685bccf92c196c",
+      "identical": true
+    },
+    {
+      "path": "kernels/elementwise/readme.en.md",
+      "source_path": "kernels/elementwise/readme.md",
+      "original_blob": "e4df1db96c58c23a70fb6a2f37d054a27bd7e646",
+      "snapshot_blob": "e4df1db96c58c23a70fb6a2f37d054a27bd7e646",
+      "identical": true
+    },
+    {
+      "path": "kernels/elu/readme.en.md",
+      "source_path": "kernels/elu/readme.md",
+      "original_blob": "4ed128bff5e7e3ba9e8411012a1eb89843fee9da",
+      "snapshot_blob": "4ed128bff5e7e3ba9e8411012a1eb89843fee9da",
+      "identical": true
+    },
+    {
+      "path": "kernels/embedding/readme.en.md",
+      "source_path": "kernels/embedding/readme.md",
+      "original_blob": "40c025a5d0644b487778a58d8efebe8bb4865a16",
+      "snapshot_blob": "40c025a5d0644b487778a58d8efebe8bb4865a16",
+      "identical": true
+    },
+    {
+      "path": "kernels/flash_attn/readme.en.md",
+      "source_path": "kernels/flash_attn/readme.md",
+      "original_blob": "a6a7f5eff8831c4e167d406aeb726aba73f36969",
+      "snapshot_blob": "a6a7f5eff8831c4e167d406aeb726aba73f36969",
+      "identical": true
+    },
+    {
+      "path": "kernels/flash_decode/readme.en.md",
+      "source_path": "kernels/flash_decode/readme.md",
+      "original_blob": "d4ccb9ec016f6c1050ff2989e2e166cb863404b7",
+      "snapshot_blob": "d4ccb9ec016f6c1050ff2989e2e166cb863404b7",
+      "identical": true
+    },
+    {
+      "path": "kernels/gelu/readme.en.md",
+      "source_path": "kernels/gelu/readme.md",
+      "original_blob": "d587d75a312079a9bce050693ac827451d6da0bb",
+      "snapshot_blob": "d587d75a312079a9bce050693ac827451d6da0bb",
+      "identical": true
+    },
+    {
+      "path": "kernels/hardswish/readme.en.md",
+      "source_path": "kernels/hardswish/readme.md",
+      "original_blob": "ca4259f18c72e7b0b3252c6f99f39d797d1cdac2",
+      "snapshot_blob": "ca4259f18c72e7b0b3252c6f99f39d797d1cdac2",
+      "identical": true
+    },
+    {
+      "path": "kernels/hgemm/readme.en.md",
+      "source_path": "kernels/hgemm/readme.md",
+      "original_blob": "dc8da8b9f4b740d17cf06cd276bd51aae4c82ee0",
+      "snapshot_blob": "dc8da8b9f4b740d17cf06cd276bd51aae4c82ee0",
+      "identical": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/readme.en.md",
+      "source_path": "kernels/hgemm_sm120/readme.md",
+      "original_blob": "e3be8c4d2a61e675b2648dcf1fbf900075e89d3c",
+      "snapshot_blob": "e3be8c4d2a61e675b2648dcf1fbf900075e89d3c",
+      "identical": true
+    },
+    {
+      "path": "kernels/mat_transpose/readme.en.md",
+      "source_path": "kernels/mat_transpose/readme.md",
+      "original_blob": "3f48154c4c54e66a8d6a2e02d7a56075ff889c65",
+      "snapshot_blob": "3f48154c4c54e66a8d6a2e02d7a56075ff889c65",
+      "identical": true
+    },
+    {
+      "path": "kernels/normalization/readme.en.md",
+      "source_path": "kernels/normalization/readme.md",
+      "original_blob": "d7dec74073b01e7a12658d3da7d943cc0d1e8bd4",
+      "snapshot_blob": "d7dec74073b01e7a12658d3da7d943cc0d1e8bd4",
+      "identical": true
+    },
+    {
+      "path": "kernels/reduce/readme.en.md",
+      "source_path": "kernels/reduce/readme.md",
+      "original_blob": "61494a14d6167c9c5835f6a3542994b2d1b47367",
+      "snapshot_blob": "61494a14d6167c9c5835f6a3542994b2d1b47367",
+      "identical": true
+    },
+    {
+      "path": "kernels/relu/readme.en.md",
+      "source_path": "kernels/relu/readme.md",
+      "original_blob": "cf2df520988d2be90fab864ed14bd1464e95321f",
+      "snapshot_blob": "cf2df520988d2be90fab864ed14bd1464e95321f",
+      "identical": true
+    },
+    {
+      "path": "kernels/relu6/readme.en.md",
+      "source_path": "kernels/relu6/readme.md",
+      "original_blob": "2a1c068218bd7c15fc00daa0b841751fb4f5c667",
+      "snapshot_blob": "2a1c068218bd7c15fc00daa0b841751fb4f5c667",
+      "identical": true
+    },
+    {
+      "path": "kernels/rmsnorm/readme.en.md",
+      "source_path": "kernels/rmsnorm/readme.md",
+      "original_blob": "c4486b3f65f0ca6733216e1dca5e4862a651ef42",
+      "snapshot_blob": "c4486b3f65f0ca6733216e1dca5e4862a651ef42",
+      "identical": true
+    },
+    {
+      "path": "kernels/rope/readme.en.md",
+      "source_path": "kernels/rope/readme.md",
+      "original_blob": "cdea5633cdd6b992c8f1799c679219a25e1e192a",
+      "snapshot_blob": "cdea5633cdd6b992c8f1799c679219a25e1e192a",
+      "identical": true
+    },
+    {
+      "path": "kernels/sampling/readme.en.md",
+      "source_path": "kernels/sampling/readme.md",
+      "original_blob": "98fb36dc730572eff9b78444c97d4406885b515c",
+      "snapshot_blob": "98fb36dc730572eff9b78444c97d4406885b515c",
+      "identical": true
+    },
+    {
+      "path": "kernels/sgemm/readme.en.md",
+      "source_path": "kernels/sgemm/readme.md",
+      "original_blob": "bd9cae33f25f2ecaebebc76f96f7d045c096efbf",
+      "snapshot_blob": "bd9cae33f25f2ecaebebc76f96f7d045c096efbf",
+      "identical": true
+    },
+    {
+      "path": "kernels/sgemv/readme.en.md",
+      "source_path": "kernels/sgemv/readme.md",
+      "original_blob": "de4b1d5a28afc022380deee7682e7de83fa4ab09",
+      "snapshot_blob": "de4b1d5a28afc022380deee7682e7de83fa4ab09",
+      "identical": true
+    },
+    {
+      "path": "kernels/sigmoid/readme.en.md",
+      "source_path": "kernels/sigmoid/readme.md",
+      "original_blob": "8ca383a41adb8f1ac8f5b7ff971eed8675814604",
+      "snapshot_blob": "8ca383a41adb8f1ac8f5b7ff971eed8675814604",
+      "identical": true
+    },
+    {
+      "path": "kernels/silu/readme.en.md",
+      "source_path": "kernels/silu/readme.md",
+      "original_blob": "8dbf212cd80fb0427679fe3f2b39c651993d61b4",
+      "snapshot_blob": "8dbf212cd80fb0427679fe3f2b39c651993d61b4",
+      "identical": true
+    },
+    {
+      "path": "kernels/softmax/readme.en.md",
+      "source_path": "kernels/softmax/readme.md",
+      "original_blob": "683f8c148b5280f963611ea0fcc92be07123d37f",
+      "snapshot_blob": "683f8c148b5280f963611ea0fcc92be07123d37f",
+      "identical": true
+    },
+    {
+      "path": "kernels/sort/readme.en.md",
+      "source_path": "kernels/sort/readme.md",
+      "original_blob": "fb98b9372b1d94f475c40b5048ff219357a6e825",
+      "snapshot_blob": "fb98b9372b1d94f475c40b5048ff219357a6e825",
+      "identical": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/softmax/readme.en.md",
+      "source_path": "kernels_dsl/tilelang/softmax/readme.md",
+      "original_blob": "98cfce41f748cba93c958c0fb03a9c260171393a",
+      "snapshot_blob": "98cfce41f748cba93c958c0fb03a9c260171393a",
+      "identical": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/vector_add/readme.en.md",
+      "source_path": "kernels_dsl/tilelang/vector_add/readme.md",
+      "original_blob": "2017bfff82e399e4d6c8de93301c53956a1f96dc",
+      "snapshot_blob": "2017bfff82e399e4d6c8de93301c53956a1f96dc",
+      "identical": true
+    },
+    {
+      "path": "kernels_dsl/triton/vector_add/readme.en.md",
+      "source_path": "kernels_dsl/triton/vector_add/readme.md",
+      "original_blob": "f34042529dba534bda8c398df3ea8c803259d7b5",
+      "snapshot_blob": "f34042529dba534bda8c398df3ea8c803259d7b5",
+      "identical": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/readme.en.md",
+      "source_path": "samples/bank_conflict_ncu/readme.md",
+      "original_blob": "526509e671ed21ef2a74ad082e12c0e82ccd524b",
+      "snapshot_blob": "526509e671ed21ef2a74ad082e12c0e82ccd524b",
+      "identical": true
+    }
+  ],
+  "markdown_fences": [
+    {
+      "path": "README.md",
+      "original_fenced_blocks": 1,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "docs/zh-CN/入门教程.md",
+      "original_fenced_blocks": 4,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "docs/zh-CN/术语表.md",
+      "original_fenced_blocks": 0,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "docs/zh-CN/激活函数对比.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "docs/zh-CN/翻译进度.md",
+      "original_fenced_blocks": 0,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "infer/torch/torch_dist/readme.md",
+      "original_fenced_blocks": 12,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/cumsum/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/dot_product/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/elu/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/embedding/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/flash_attn/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/flash_decode/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/gelu/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/hardswish/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/hgemm/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/hgemm_sm120/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/mat_transpose/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/normalization/readme.md",
+      "original_fenced_blocks": 3,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/reduce/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/relu6/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/rmsnorm/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/rope/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/sampling/readme.md",
+      "original_fenced_blocks": 4,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/sgemm/readme.md",
+      "original_fenced_blocks": 4,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/sgemv/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/silu/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/softmax/readme.md",
+      "original_fenced_blocks": 4,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels/sort/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/softmax/readme.md",
+      "original_fenced_blocks": 3,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels_dsl/tilelang/vector_add/readme.md",
+      "original_fenced_blocks": 3,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "kernels_dsl/triton/vector_add/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/readme.md",
+      "original_fenced_blocks": 2,
+      "original_blocks_preserved_in_order": true
+    }
+  ],
+  "protected_originals": [
+    {
+      "path": "LICENSE",
+      "identical": true
+    },
+    {
+      "path": "README.en.md",
+      "identical": true
+    },
+    {
+      "path": "infer/torch/overlap_infer/readme.md",
+      "identical": true
+    },
+    {
+      "path": "infer/torch/torch_dist/readme_cn.md",
+      "identical": true
+    },
+    {
+      "path": "kernels/elementwise/readme.en.md",
+      "identical": true
+    },
+    {
+      "path": "kernels/relu/readme.en.md",
+      "identical": true
+    },
+    {
+      "path": "kernels/sigmoid/readme.en.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/flash_decoing.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/fmha_beating_fa2.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/hgemm_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/hgemm_sm120_tma.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/kernel_fusion_rope.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/mat_transpose.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/numbers_cuda_programmer_should_know.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/safe_online_softmax.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/sgemm_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/sgemm_tf32_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/en/understanding_your_gpu_with_device_query.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/flash_decoing.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/fmha_beating_fa2.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/hgemm_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/hgemm_sm120_tma.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/kernel_fusion_rope.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/mat_transpose.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/numbers_cuda_programmer_should_know.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/safe_online_softmax.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/sgemm_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/sgemm_tf32_beating_cublas.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/topk_top_sampling.md",
+      "identical": true
+    },
+    {
+      "path": "posts/zh/understanding_your_gpu_with_device_query.md",
+      "identical": true
+    },
+    {
+      "path": "samples/bank_conflict_ncu/readme_cn.md",
+      "identical": true
+    },
+    {
+      "path": "samples/local_memory/readme.md",
+      "identical": true
     }
   ]
 }

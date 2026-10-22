@@ -1,7 +1,11 @@
 """Isolate the L2 effect: identical timer (CUDA events, no graph, no CUPTI), toggling ONLY cold_l2_cache (False=warm/resident, True=flushed each iter)."""
 
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 计时并不验证采样分布；不同实现相同 seed 也不自动保证逐词元相同。
+# 当前 CUDA 源码的 BF16 路径存在按 FP16 解码的问题，详见 sampling.cu 与中文 README。
+
 import numpy as np, torch
-import test as bench  # triggers JIT build of the custom lib
+import test as bench  # 导入时触发自定义 CUDA 扩展的即时编译。
 import flashinfer
 from flashinfer.testing.utils import bench_gpu_time
 
@@ -14,6 +18,9 @@ def gen_spiked(bs, V):
     return bench.generate_realistic_logits(bs, V, num_spikes=50)
 
 
+# 原始模块 docstring 的中文说明：固定 CUDA Event 计时器，不用 Graph/CUPTI，
+# 只切换 cold_l2_cache；False 不要求每轮清缓存，True 请求每轮清缓存。
+# 返回计时样本中位数；“warm”标签本身不是缓存命中率已实测的证明。
 def measure(fn, logits, cold):
     times = bench_gpu_time(
         fn=fn,
@@ -21,7 +28,7 @@ def measure(fn, logits, cold):
         dry_run_iters=10,
         repeat_iters=100,
         enable_cupti=False,
-        use_cuda_graph=False,  # pure CUDA-event timer
+        use_cuda_graph=False,  # 仅使用 CUDA Event 计时，不使用 CUDA Graph。
         cold_l2_cache=cold,
     )
     return float(np.median(times))
