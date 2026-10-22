@@ -1,3 +1,6 @@
+# 中文导读：比较整个张量的求和，覆盖浮点与 INT8；INT8 自定义输出是 INT32。
+# 相对误差表达式未单独处理参考值为零的情形，测试尺寸和断言均保持原样。
+# 本次只翻译和补充注释，未执行 CUDA 编译、GPU 正确性或性能测试。
 import numpy as np
 from functools import partial
 from pathlib import Path
@@ -10,7 +13,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 即时编译 CUDA 源文件并加载为 Python 扩展；首次执行需要可用的 CUDA 编译环境。
 lib = load(
     name="reduce_sum_lib",
     sources=[str(current_dir / "reduce_sum.cu")],
@@ -34,6 +37,7 @@ baseline = None
 def benchmark(op, a, warmup=10, rep=100, prefix="torch"):
     global baseline
 
+    # 使用原设置预热、重复计时并启用 cold_l2_cache；不在本次翻译中改变测量条件。
     times = bench_gpu_time(
         fn=op,
         input_args=(a,),
@@ -43,6 +47,7 @@ def benchmark(op, a, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际统计量是中位数；输出中的英文 mean time 标签按原样保留。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -61,7 +66,7 @@ def diff_check(a, b, prefix="torch", rel=1e-5, abl = 1e-5):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行原有测试尺寸与基准流程。
     device = torch.device("cuda")
     sz = [1024, 2048, 4096]
     # sz = [2, 2, 2]
@@ -77,7 +82,7 @@ if __name__ == "__main__":
             out_my = benchmark(lib.reduce_sum_fp32x4, a, prefix="reduce_sum_fp32x4")
             diff_check(out, out_my, prefix="reduce_sum_fp32x4")
 
-            ################### half
+            ################### 半精度（FP16）
             a = a.half()
             out = benchmark(torch.sum, a)
             out_my = benchmark(lib.reduce_sum, a, prefix="reduce_sum_half")
@@ -87,7 +92,7 @@ if __name__ == "__main__":
             out_my = benchmark(lib.reduce_sum_fp16x8_packed, a, prefix="reduce_sum_fp16x8_packed")
             diff_check(out, out_my, prefix="reduce_sum_fp16x8_packed")
 
-            ################## int8
+            ################## 有符号 8 位整数（INT8）
             a = torch.randint(-128, 127, (n, m) , dtype=torch.int8, device="cuda")
             out = benchmark(torch.sum, a)
             out_my = benchmark(lib.reduce_sum_i8, a, prefix="reduce_sum_i8")

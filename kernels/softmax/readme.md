@@ -1,28 +1,52 @@
-# Softmax
+# Softmax（归一化指数函数）
 
-## Overview
+[英文原文](./readme.en.md) · [中文首页](../../README.md) · [翻译进度](../../docs/zh-CN/翻译进度.md)
 
-High-performance safe online softmax kernels with multiple strategies for different row sizes.
+> 本页翻译并保留原始章节、命令与历史输出；本次仅修改文档和源码注释，未进行 CUDA 编译、GPU 正确性测试或性能复测。
 
-- [x] One-pass (single-row-per-block, register-resident)
-  - [x] Safe online softmax — FP32 / FP16
-  - [x] Safe online softmax — FP32 vectorized (×4)
-  - [x] Safe online softmax — FP16 vectorized (×8, pure register, packed r/w)
-  - [x] Safe online softmax **medium** — FP16 vectorized (moderate register + SMEM, packed r/w)
-  - [x] Safe online softmax **extreme** — FP16 vectorized (max register + SMEM, packed r/w)
-- [x] Two-pass (for large row sizes beyond single-block capacity)
-  - [x] Safe online softmax **arbitrary** — FP16 vectorized (max register + SMEM, packed r/w)
-  - [x] Safe online softmax **split-k** — FP16 vectorized (max register + SMEM, packed r/w)
-- [x] PyTorch op binding & correctness check
+## 概述
 
-## Build & Test
+使用最大值平移的在线 softmax 核函数，针对不同行宽提供多种实现策略。原文中的 “safe” 指指数计算的数值稳定性设计，不表示对任意输入形状或 NaN/Inf 都有完整支持。
+
+- [x] 单遍读取方案（每行一个线程块，使用寄存器或寄存器与共享内存缓存）
+  - [x] 在线 softmax：FP32 / FP16
+  - [x] 在线 softmax：FP32 向量化（×4）
+  - [x] 在线 softmax：FP16 向量化（×8，仅用寄存器，打包读写）
+  - [x] 在线 softmax **medium**：FP16 向量化（适量寄存器 + 共享内存，打包读写）
+  - [x] 在线 softmax **extreme**：FP16 向量化（更多寄存器 + 共享内存，打包读写）
+- [x] 两遍读取方案（面向超出单块固定缓存容量的大行宽）
+  - [x] 在线 softmax **arbitrary**：FP16 向量化、打包读写；当前源码分两遍读取输入，不缓存整行（原概述写作“最大寄存器 + SMEM”，与当前实现不完全对应）
+  - [x] 在线 softmax **split-k**：FP16 向量化、打包读写；分块统计后借助全局工作区合并（原概述写作“最大寄存器 + SMEM”）
+- [x] PyTorch 算子绑定与正确性检查
+
+## 中文阅读指引与容量限制
+
+输入/输出布局为连续二维 `[bs,hidden_size]`。先读 [CUDA 实现](./softmax.cu) 的 `MD` 与 `block_online_softmax_reduce`：每组数据记录 `(m,d)`，其中 `m` 是最大值，`d=sum(exp(x-m))`；合并两组时先统一最大值，再缩放各自的分母。这解释了在线合并为何不能直接把两个 `d` 相加。
+
+下面的容量由当前模板参数与循环次数计算，**不是本次 GPU 测试结果**。包装没有自动检查所有容量或尾部条件。
+
+| Python 入口 | 输入类型与单行容量 | 调用方需关注的条件 |
+| --- | --- | --- |
+| `softmax` | FP32/FP16，最多 8192 列 | 每线程最多缓存 32 个标量；超出的列不会被处理 |
+| `softmax_fp32x4` | FP32，最多 8192 列 | 行宽为 4 的倍数，首地址及每行满足 16 字节对齐 |
+| `softmax_fp16x8_packed` | FP16，最多 32768 列 | 每线程 16 组，每组 8 元素；原注释的 8192 与当前循环不符 |
+| `softmax_medium` | FP16，最多 32768 列 | `(8+8)*256*8`，动态共享内存 32768 字节 |
+| `softmax_extreme` | FP16，最多 114688 列 | `(32+24)*256*8`，动态共享内存 98304 字节，受设备资源限制 |
+| `softmax_arbitrary` | FP16，两遍读取，未用固定数组缓存整行 | 名称不代表任意 dtype/形状；仍按 8 元素整组读写 |
+| `softmax_splitk` | FP16，每块分片容量 32768 列 | 第一阶段统计，第二阶段合并并写回；使用 FP32 全局工作区 |
+
+所有 FP16 打包路径都要求行宽为 8 的倍数及相应的 16 字节对齐，因为判断只检查数据组起点。`medium`、`extreme`、`arbitrary`、`splitk` 的包装直接把指针解释为 `half*`，不会转换错误 dtype。输入输出还应同形、同设备且空间充足；空输入、超大整数索引、NaN/Inf 与输入输出重叠需要另行分析。
+
+`test.py` 默认只调用 `test_small()`，部分 FP32 测试在原文件中已注释；不能把脚本成功运行理解为所有入口已测。其计时取中位数，保留的输出标签仍为 `mean time`。`test_for_ncu.py`/`run_ncu.sh` 用于分析器采集，与普通计时条件不同。
+
+## 编译与测试
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### PTX Output
+### 历史 PTX 编译输出
 
 ```yaml
 ptxas info    : 28 bytes gmem
@@ -73,9 +97,9 @@ ptxas info    : Used 86 registers, used 1 barriers, 64 bytes smem
 ptxas info    : Compile time = 17.167 ms
 ```
 
-### Benchmark Results
+### 历史基准结果
 
-#### Large Row Sizes
+#### 大行宽
 
 ```yaml
 ####################################################################################################
@@ -126,7 +150,7 @@ softmax_arbitrary              mean time: 10.154320 ms, speedup: 0.68
 softmax_splitk                 mean time: 2.340544 ms, speedup: 2.95
 ```
 
-#### Small Row Sizes
+#### 小行宽
 
 ```yaml
 ninja: no work to do.

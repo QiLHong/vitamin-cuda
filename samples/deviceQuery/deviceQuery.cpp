@@ -1,15 +1,14 @@
-// adapted from https://github.com/nvidia/cuda-samples/blob/master/Samples/1_Utilities/deviceQuery/deviceQuery.cpp
+// 中文导读：查询 CUDA 设备属性；输出标签和内置架构映射保持原文原值。
+// 改编自（保留原来源署名）：https://github.com/nvidia/cuda-samples/blob/master/Samples/1_Utilities/deviceQuery/deviceQuery.cpp
 #include <cuda_runtime.h>
 #include <iostream>
 #include <memory>
 #include <string>
 
 inline int _ConvertSMVer2Cores(int major, int minor) {
-    // Defines for GPU Architecture types (using the SM version to determine
-    // the # of cores per SM
+    // 按 SM 版本查表估计每个 SM 的 CUDA Core 数；这是源文件内置的映射，不是运行时直接查询。
     typedef struct {
-        int SM; // 0xMm (hexidecimal notation), M = SM Major version,
-        // and m = SM minor version
+        int SM; // 十六进制 0xMm：M 是 SM 主版本，m 是次版本。
         int Cores;
     } sSMtoCores;
 
@@ -29,8 +28,7 @@ inline int _ConvertSMVer2Cores(int major, int minor) {
         index++;
     }
 
-    // If we don't find the values, we default use the previous one
-    // to run properly
+    // 未命中映射时沿用最后一项作为回退值；此值不保证准确描述未知架构。
     printf("MapSMtoCores for SM %d.%d is undefined."
            "  Default to use %d Cores/SM\n",
            major,
@@ -51,6 +49,7 @@ int main(int argc, char **argv) {
 
         cudaDriverGetVersion(&drv_ver);
         cudaRuntimeGetVersion(&runtime_ver);
+        // 本示例直接打印设备属性；原代码未逐项检查 Runtime API 返回状态。
         cudaGetDeviceProperties(&device_prop, dev);
 
         printf("  CUDA Driver Version / Runtime Version          %d.%d / %d.%d\n",
@@ -93,8 +92,7 @@ int main(int argc, char **argv) {
         }
 
 #else
-        // This only available in CUDA 4.0-4.2 (but these were only exposed in the
-        // CUDA Driver API)
+        // 原注释说明：CUDA 4.0–4.2 中这些属性仅由 Driver API 暴露。
         int memoryClock;
         getCudaAttribute<int>(&memoryClock, CU_DEVICE_ATTRIBUTE_MEMORY_CLOCK_RATE, dev);
         printf("  Memory Clock rate:                             %.0f Mhz\n", memoryClock * 1e-3f);
@@ -163,7 +161,7 @@ int main(int argc, char **argv) {
         printf("  Device supports Compute Preemption:            %s\n",
                device_prop.computePreemptionSupported ? "Yes" : "No");
         printf("  Supports Cooperative Kernel Launch:            %s\n", device_prop.cooperativeLaunch ? "Yes" : "No");
-        // The property cooperativeMultiDeviceLaunch is deprecated in CUDA 13.0
+        // 原兼容分支：CUDA 13.0 起不再在此访问已弃用的 cooperativeMultiDeviceLaunch 属性。
 #if CUDART_VERSION < 13000
         printf("  Supports MultiDevice Co-op Kernel Launch:      %s\n",
                device_prop.cooperativeMultiDeviceLaunch ? "Yes" : "No");

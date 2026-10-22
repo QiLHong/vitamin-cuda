@@ -1,3 +1,9 @@
+/*
+ * 中文导读：NeoX 风格的旋转位置编码，输入/输出布局为连续 FP32 [bs,seq_len,head_dim]。
+ * 将第 i 维与第 i+head_dim/2 维配成 (x,y)，按位置相关角度旋转；不是相邻偶/奇维配对。
+ * theta 固定为 10000，位置从 0 开始；没有额外 position_ids 或位置偏移参数。
+ * 包装未完整检查形状、设备和输出大小；本次只补注释，没有修改算法或执行 GPU 测试。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -14,7 +20,7 @@
 
 const float theta = 10000.f;
 
-// rope neox
+// NeoX 风格的 RoPE：将 head_dim 的前、后两半中对应的元素配成一对进行旋转。
 __global__ void rope_kernel(float *a, float *b, int seq_len, int head_dim) {
     int pos = blockIdx.x;
     int idx = blockIdx.y * (seq_len * head_dim) + pos * head_dim + threadIdx.x;
@@ -35,6 +41,9 @@ __global__ void rope_kernel(float *a, float *b, int seq_len, int head_dim) {
     b[idx + head_dim / 2] = y_new;
 }
 
+// 一个线程处理四对旋转元素，一个线程块覆盖四个序列位置，读写使用 float4。
+// 当前网格按 seq_len/4 向下取整，且没有核内边界检查，因此要求 seq_len 为 4 的倍数。
+// head_dim/2 还须为 4 的倍数，即 head_dim 为 8 的倍数，保证组内不跨行与 16 字节对齐。
 __global__ void rope_fp32x4_kernel(float *a, float *b, int seq_len, int head_dim) {
     int pos = blockIdx.x * 4;
     int tid = threadIdx.x;
@@ -66,6 +75,9 @@ __global__ void rope_fp32x4_kernel(float *a, float *b, int seq_len, int head_dim
 
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 每个块启动 head_dim/2 个线程，要求正偶数 head_dim 且线程数不超过设备每块上限。
+// a/b 应同形、同设备、连续 FP32；原包装只显式检查 CUDA/连续性及 data_ptr<float>() 类型。
+// num 控制一个块覆盖的序列位置数：标量版本为 1，向量化版本为 4。
 #define binding_func_gen(name, num, element_dtype)                                                                     \
     void name(torch::Tensor a, torch::Tensor b) {                                                                      \
         CHECK_T(a);                                                                                                    \
@@ -83,7 +95,7 @@ __global__ void rope_fp32x4_kernel(float *a, float *b, int seq_len, int head_dim
 
 binding_func_gen(rope, 1, float);
 binding_func_gen(rope_fp32x4, 4, float);
-// binding
+// Python 绑定。
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch_pybinding_func(rope);

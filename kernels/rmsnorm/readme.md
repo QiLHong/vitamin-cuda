@@ -1,27 +1,45 @@
-# rmsnorm
+# RMSNorm：均方根归一化
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-RMSNorm kernels.
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
 
-- [x] naive Torch RMSNorm
+## 概述
+
+均方根归一化（RMSNorm）核函数。
+
+- [x] 朴素 Torch RMSNorm 基准
 - [x] rmsnorm — FP32 / FP16
-- [x] rmsnorm_fp32x4 — vectorized FP32
+- [x] rmsnorm_fp32x4 — FP32 向量化
 - [x] rmsnorm_fp32x4_smem
-- [x] rmsnorm_fp16x8 — vectorized FP16, packed r/w
-- [x] rmsnorm_fp16x8_smem — vectorized FP16, packed r/w
-- [x] pytorch op bindings && diff check
+- [x] rmsnorm_fp16x8 — FP16 向量化、打包读写
+- [x] rmsnorm_fp16x8_smem — FP16 向量化、打包读写，并缓存权重到共享内存
+- [x] PyTorch 算子绑定与结果差异检查
 
-## Run tests
+## 中文导读与适用范围
 
-L2 is large enough that staging weights in shared memory barely helps; the bottleneck stays input/output traffic.
+输入 `a` 为 `[bs, hidden_size]`，权重 `b` 为 `[hidden_size]`，输出与输入同形状。每行计算 `a * b / sqrt(mean(a*a) + 1e-6)`，不减均值。线程先保存本线程的数据并累计平方和，再做块内规约，得到整行的倒数均方根后写回。
+
+`_smem` 版本先把权重读入动态共享内存，再让同一线程块按网格步长处理多行以复用权重。原包装用 `ceil(bs/16)` 个块启动，不表示每个块恰好处理连续的 16 行。FP16x8 路径在保存 `a*b` 的中间结果时会舍入为 half2，最终缩放后再舍入一次，不能把它视作全程 FP32 算术。
+
+沿用原注释声明的入门范围：`0 < hidden_size <= 8192`。核函数使用固定大小的线程私有数组，包装没有检查该上限。FP32x4 的行长需为 4 的倍数，FP16x8 需为 8 的倍数，打包首地址需满足 16 字节对齐；这些路径没有逐元素尾部处理。权重 dtype、长度、设备以及输入二维形状也需调用方保证。
+
+原概览中的 `rmsnorm_fp16x8`、`rmsnorm_fp16x8_smem` 对应源码入口 `rmsnorm_fp16x8_packed`、`rmsnorm_fp16x8_packed_smem`。测试用平均绝对误差判断结果，平均值可能掩盖个别较大偏差；下方记录不等于全面数值验证。
+
+## 运行测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
+
+原实验说明：当 L2 缓存足够大时，将权重暂存到共享内存几乎没有收益，瓶颈仍是输入输出流量。这是原测试场景的解释，不是对所有 GPU、形状或缓存状态的保证。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
+
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
 
 ```bash
 ####################################################################################################

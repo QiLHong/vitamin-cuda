@@ -1,3 +1,12 @@
+/*
+ * 中文导读：单个查询位置的 Flash Decoding；Q/O 为 [q_head,128]，K/V 为 [kv_len,kv_head,128]。
+ * 入口把输入/输出解释为 BF16；中间点积、softmax、分块输出和 log-sum-exp 工作区使用 FP32。
+ * 网格把 KV 序列划分为多个 chunk；第一阶段计算各块结果，第二阶段按 log-sum-exp 权重合并。
+ * 一个 128 线程的块分成 8 个 16 线程子组，每个线程负责头维中的 8 个元素。
+ * _dbf_k 版本为 K 配置双缓冲，为 V 保留单缓冲；每个 K 缓冲有独立的屏障与阶段标记。
+ * 包装未完整检查 dtype、形状和同设备关系；固定 num_sms=26 是原实现的调度假设。
+ * 本次保留原算法；未执行 CUDA 编译、GPU 正确性、竞态检查或性能复测。
+ */
 #include <cfloat>
 #include <cstdio>
 #include <cuda.h>
@@ -14,29 +23,30 @@
 
 #include "../common/pack.cuh"
 
-// ---------------- Inline PTX assembly macros ----------------
-// ---------------- MBarrier & TMA (pure PTX helpers) ----------------
+// ---------------- 内联 PTX 汇编宏 ----------------
+// ---------------- MBarrier 与 TMA（直接使用 PTX 的辅助函数）----------------
 
-// MBarrier object (8-byte aligned per hardware)
+// mbarrier 对象：使用的共享内存地址须满足 8 字节对齐。
 typedef uint64_t mbarrier_t;
 
-// Init barrier (single thread in prologue)
+// 初始化屏障：在核函数的准备阶段由单个线程调用。
 __device__ __forceinline__ void mbarrier_init(mbarrier_t *mbar, uint32_t expected_count) {
     asm volatile("mbarrier.init.shared.b64 [%0], %1;\n" ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(mbar))),
                  "r"(expected_count));
 }
 
-// Expected byte count for the TMA transfer
+// 为本阶段登记 TMA 传输的预期字节数，同时执行 arrive 操作。
 __device__ __forceinline__ void mbarrier_expect_tx(mbarrier_t *mbar, uint32_t tx_bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n" ::"r"(
                      static_cast<uint32_t>(__cvta_generic_to_shared(mbar))),
                  "r"(tx_bytes));
 }
 
-// Wait until the TMA copy completes.
+// 等待对应阶段的 TMA 拷贝完成。
 __device__ __forceinline__ void mbarrier_wait(uint64_t *smem_ptr, uint32_t phase) {
     uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    // Large spin timeout (0x989680 == 10,000,000 cycles)
+    // 等待提示值为 0x989680，即 10,000,000 纳秒；原注释的 cycles 单位有误。
+    // PTX 的 timeHint 只是单次等待提示；下面的分支会反复尝试，直到屏障阶段完成。
     uint32_t ticks = 0x989680;
 
     asm volatile("{\n\t"
@@ -52,7 +62,7 @@ __device__ __forceinline__ void mbarrier_wait(uint64_t *smem_ptr, uint32_t phase
                  : "memory");
 }
 
-// CTA 3D TMA: global -> shared
+// CTA 内的三维 TMA 拷贝：全局内存 -> 共享内存。
 __device__ __forceinline__ void cp_async_bulk_tensor_3d(
     mbarrier_t *mbar, const void *tmap, const void *smem_ptr, int32_t s_0, int32_t s_1, int32_t s_2) {
     uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
@@ -130,6 +140,7 @@ __device__ __forceinline__ float block_reduce_max(float val) {
     return sdata[0];
 }
 
+// 各子组的同一 lane 对应相同的头维元素；沿子组维相加，不把不同输出列混在一起。
 template <const int num_group, const int group_size>
 __device__ __forceinline__ float block_reduce_sum_by_lane(float val) {
     __shared__ float sdata[num_group][group_size];
@@ -150,7 +161,9 @@ __device__ __forceinline__ float block_reduce_sum_by_lane(float val) {
     return sdata[0][lane_id];
 }
 
-// flash decoding softmax(q @ k.T*scale) @ v
+// 注意原实现：单缓冲 KV 循环末尾没有全块屏障；下一轮线程 0 发起覆盖前，
+// 是否所有线程束都已读完共享缓冲区，需要另做同步审查与竞态验证；此处没有修复。
+// 单缓冲 Flash Decoding：分块计算 softmax(q @ k.T * scale) @ v。
 template <const int BN = 64,
           const int CHUNK_SIZE = 256,
           const int HEAD_DIM = 128,
@@ -159,8 +172,8 @@ template <const int BN = 64,
 __global__ void flash_decode_tma_kernel(T *q,
                                         const __grid_constant__ CUtensorMap tma_k,
                                         const __grid_constant__ CUtensorMap tma_v,
-                                        float *ws_o,   // [q_head, num_chunks, HEAD_DIM]
-                                        float *ws_lse, // [q_head, num_chunks]
+                                        float *ws_o,   // 分块输出工作区：[q_head, num_chunks, HEAD_DIM]。
+                                        float *ws_lse, // 分块 log-sum-exp 工作区：[q_head, num_chunks]。
                                         int kv_len,
                                         int q_head,
                                         int kv_head,
@@ -168,14 +181,14 @@ __global__ void flash_decode_tma_kernel(T *q,
     static_assert(THREADS_PER_BLOCK == 128);
     static_assert(BN == 64);
 
-    // 1. shared memory: K tile, V tile, mbarriers
+    // 1. 划分共享内存中的 K/V 分块缓冲区和 mbarrier。
     extern __shared__ __align__(128) uint8_t smem_buf[];
     T(*Ks)[HEAD_DIM] = reinterpret_cast<T(*)[HEAD_DIM]>(smem_buf);
     T(*Vs)[HEAD_DIM] = reinterpret_cast<T(*)[HEAD_DIM]>(smem_buf + BN * HEAD_DIM * sizeof(T));
     mbarrier_t *mbar_k = reinterpret_cast<mbarrier_t *>(smem_buf + BN * HEAD_DIM * sizeof(T) * 2);
     mbarrier_t *mbar_v = mbar_k + 1;
 
-    // 2. coordinates
+    // 2. 计算线程、分块与注意力头的坐标。
     const int tid = threadIdx.x;
     const int chunk_id = blockIdx.x;
     const int q_head_id = blockIdx.y;
@@ -194,26 +207,26 @@ __global__ void flash_decode_tma_kernel(T *q,
     }
     __syncthreads();
 
-    // 3. load q fragment
+    // 3. 加载当前线程负责的 Q 片段。
     pack128 qs{FLOAT4(q[q_head_id * HEAD_DIM + lane_id * 8])};
 
-    // 4. init subgroup-local online softmax state
+    // 4. 初始化线程子组的在线 softmax 状态。
     __align__(16) float acc_o[8] = {0.0f};
     float m_i = -FLT_MAX;
     float d_i = 0.0f;
 
     int phase_k = 0;
     int phase_v = 0;
-    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)
+    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)，使 exp2f 对应以 e 为底的指数。
     const int num_chunks = gridDim.x;
     const int chunk_start = chunk_id * CHUNK_SIZE;
     const int chunk_end = min(chunk_start + CHUNK_SIZE, kv_len);
 
-    // 5. loop over KV tiles inside this chunk
+    // 5. 遍历当前 chunk 内的 K/V 分块。
     for (int n = chunk_start; n < chunk_end; n += BN) {
         int current_bn = min(BN, chunk_end - n);
 
-        // 5.1 TMA async load K/V
+        // 5.1 使用 TMA 异步加载 K/V。
         if (tid == 0) {
             mbarrier_expect_tx(mbar_k, BN * HEAD_DIM * sizeof(T));
             mbarrier_expect_tx(mbar_v, BN * HEAD_DIM * sizeof(T));
@@ -222,9 +235,9 @@ __global__ void flash_decode_tma_kernel(T *q,
         }
         __syncthreads();
         mbarrier_wait(mbar_k, phase_k);
-        phase_k ^= 1; // flip phase
+        phase_k ^= 1; // 翻转待等待阶段的奇偶标记。
 
-        // 5.2 compute S = Q * K^T, keep rows per subgroup in registers
+        // 5.2 计算 S = Q * K^T，每个线程子组将负责的行保存在寄存器中。
         const int row_begin = group_id * ROWS_PER_GROUP;
         float acc_s[ROWS_PER_GROUP];
         float m_part = -FLT_MAX;
@@ -250,7 +263,7 @@ __global__ void flash_decode_tma_kernel(T *q,
             }
         }
 
-        // 5.3 accumulate subgroup-local O = P * V
+        // 5.3 累加线程子组的局部结果 O = P * V。
         mbarrier_wait(mbar_v, phase_v);
         phase_v ^= 1;
         float part_d = 0.0f;
@@ -282,7 +295,7 @@ __global__ void flash_decode_tma_kernel(T *q,
         }
     }
 
-    // 6. merge subgroup states once per chunk, then write split results
+    // 6. 当前 chunk 结束后合并各线程子组的状态，再写出分块结果。
     const float m_chunk = block_reduce_max<NUM_GROUPS, THREADS_PER_ROW>(lane_id == 0 ? m_i : -FLT_MAX);
     const float alpha = d_i > 0.0f ? exp2f(m_i - m_chunk) : 0.0f;
     const float d_chunk = block_reduce_sum<NUM_GROUPS, THREADS_PER_ROW>(lane_id == 0 ? d_i * alpha : 0.0f);
@@ -314,7 +327,7 @@ __global__ void flash_decode_tma_kernel(T *q,
     }
 }
 
-// flash decoding softmax(q @k.T *scale) @v
+// K 双缓冲 Flash Decoding：分块计算 softmax(q @ k.T * scale) @ v。
 template <const int BN = 64,
           const int CHUNK_SIZE = 256,
           const int HEAD_DIM = 128,
@@ -323,8 +336,8 @@ template <const int BN = 64,
 __global__ void flash_decode_tma_dbf_k_kernel(T *q,
                                               const __grid_constant__ CUtensorMap tma_k,
                                               const __grid_constant__ CUtensorMap tma_v,
-                                              float *ws_o,   // [q_head, num_chunks, HEAD_DIM]
-                                              float *ws_lse, // [q_head, num_chunks]
+                                              float *ws_o,   // 分块输出工作区：[q_head, num_chunks, HEAD_DIM]。
+                                              float *ws_lse, // 分块 log-sum-exp 工作区：[q_head, num_chunks]。
                                               int kv_len,
                                               int q_head,
                                               int kv_head,
@@ -332,14 +345,14 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
     static_assert(THREADS_PER_BLOCK == 128);
     static_assert(BN == 64);
 
-    // 1. shared memory: K tile, V tile, mbarriers
+    // 1. 划分共享内存中的 K/V 分块缓冲区和 mbarrier。
     extern __shared__ __align__(128) uint8_t smem_buf[];
     T(*Ks)[BN][HEAD_DIM] = reinterpret_cast<T(*)[BN][HEAD_DIM]>(smem_buf);
     T(*Vs)[HEAD_DIM] = reinterpret_cast<T(*)[HEAD_DIM]>(smem_buf + BN * HEAD_DIM * sizeof(T) * 2);
     mbarrier_t *mbar_k = reinterpret_cast<mbarrier_t *>(smem_buf + BN * HEAD_DIM * sizeof(T) * 3);
     mbarrier_t *mbar_v = mbar_k + 2;
 
-    // 2. coordinates
+    // 2. 计算线程、分块与注意力头的坐标。
     const int tid = threadIdx.x;
     const int chunk_id = blockIdx.x;
     const int q_head_id = blockIdx.y;
@@ -352,10 +365,10 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
     const int group_id = tid / THREADS_PER_ROW;
     const int lane_id = tid % THREADS_PER_ROW;
 
-    // 3. load q fragment
+    // 3. 加载当前线程负责的 Q 片段。
     pack128 qs{FLOAT4(q[q_head_id * HEAD_DIM + lane_id * 8])};
 
-    // 4. init subgroup-local online softmax state
+    // 4. 初始化线程子组的在线 softmax 状态。
     __align__(16) float acc_o[8] = {0.0f};
     float m_i = -FLT_MAX;
     float d_i = 0.0f;
@@ -363,11 +376,11 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
     int phase_k[2] = {0};
     int phase_v = 0;
 
-    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)
+    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)，使 exp2f 对应以 e 为底的指数。
     const int num_chunks = gridDim.x;
     const int chunk_start = chunk_id * CHUNK_SIZE;
     const int chunk_end = min(chunk_start + CHUNK_SIZE, kv_len);
-    // preload Ks
+    // 先预加载第一块 K，后续轮次在另一缓冲区预取下一块。
     if (tid == 0) {
         mbarrier_init(mbar_k, 1);
         mbarrier_init(mbar_k + 1, 1);
@@ -379,11 +392,11 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
     __syncthreads();
     int read_idx = 0, write_idx = 1;
 
-    // 5. loop over KV tiles inside this chunk
+    // 5. 遍历当前 chunk 内的 K/V 分块。
     for (int n = chunk_start; n < chunk_end; n += BN) {
         int current_bn = min(BN, chunk_end - n);
 
-        // 5.1 TMA async load K/V
+        // 5.1 使用 TMA 异步加载 K/V。
         if (tid == 0) {
             if (n + BN < chunk_end) {
                 mbarrier_expect_tx(mbar_k + write_idx, BN * HEAD_DIM * sizeof(T));
@@ -393,9 +406,9 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
             cp_async_bulk_tensor_3d(mbar_v, &tma_v, Vs, 0, kv_head_id, n);
         }
         mbarrier_wait(mbar_k + read_idx, phase_k[read_idx]);
-        phase_k[read_idx] ^= 1; // flip phase
+        phase_k[read_idx] ^= 1; // 翻转待等待阶段的奇偶标记。
 
-        // 5.2 compute S = Q * K^T, keep rows per subgroup in registers
+        // 5.2 计算 S = Q * K^T，每个线程子组将负责的行保存在寄存器中。
         const int row_begin = group_id * ROWS_PER_GROUP;
         float acc_s[ROWS_PER_GROUP];
         float m_part = -FLT_MAX;
@@ -421,7 +434,7 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
             }
         }
 
-        // 5.3 accumulate subgroup-local O = P * V
+        // 5.3 累加线程子组的局部结果 O = P * V。
         mbarrier_wait(mbar_v, phase_v);
         phase_v ^= 1;
         float part_d = 0.0f;
@@ -452,17 +465,17 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
             m_i = m_new;
         }
 
-        // next round
+        // 下一轮前先等待全块读完当前缓冲区，再交换读写索引。
         __syncthreads();
         read_idx ^= 1;
         write_idx ^= 1;
     }
 
-    // 6. epilogue： merge subgroup states once per chunk, then write split results
+    // 6. 收尾：每个 chunk 合并一次线程子组状态，再写出分块结果。
     const float m_chunk = block_reduce_max<NUM_GROUPS, THREADS_PER_ROW>(lane_id == 0 ? m_i : -FLT_MAX);
     const float alpha = d_i > 0.0f ? exp2f(m_i - m_chunk) : 0.0f;
     const float d_chunk = block_reduce_sum<NUM_GROUPS, THREADS_PER_ROW>(lane_id == 0 ? d_i * alpha : 0.0f);
-    // reuse buffer
+    // 复用此前保存 K/V 的共享内存，暂存各子组的输出分量。
     constexpr int O_PER_GROUP = 8 * THREADS_PER_ROW;
     constexpr int O_GROUP_STRIDE = O_PER_GROUP + THREADS_PER_ROW;
     float *sdata_o = reinterpret_cast<float *>(smem_buf);
@@ -507,6 +520,8 @@ __global__ void flash_decode_tma_dbf_k_kernel(T *q,
     }
 }
 
+// 每个 chunk 输出的是已归一化的局部结果，不能直接对各块结果取平均。
+// 先计算全局 log-sum-exp，再用 exp(lse_chunk-lse_global) 加权各块输出。
 template <const int HEAD_DIM = 128, const int THREADS_PER_BLOCK = 128, typename T>
 __global__ void flash_decode_reduce_kernel(float *ws_o, float *ws_lse, T *o, int num_chunks) {
     const int q_head_id = blockIdx.x;
@@ -558,6 +573,7 @@ __global__ void flash_decode_reduce_kernel(float *ws_o, float *ws_lse, T *o, int
     FLOAT4(o[q_head_id * HEAD_DIM + col]) = out_pack.f4;
 }
 
+// 根据目标线程块数选择离散 chunk 大小；下方公式只是调度启发式，不是硬件自动调优。
 inline int get_chunk_size(int q_head, int kv_len, int num_sms) {
     int target_blocks = num_sms * 2;
 
@@ -588,17 +604,17 @@ inline CUtensorMap create_3d_tensor_map(T *global_address,
                                         uint64_t stride_h,
                                         uint64_t stride_s,
                                         uint32_t box_d,
-                                        uint32_t box_s) // Each kernel load takes a (box_s x box_d) block
+                                        uint32_t box_s) // 每次加载一个 box_s × box_d 的数据分块。
 {
     CUtensorMap tmap;
     CUtensorMapDataType type =
         std::is_same_v<T, __half> ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16 : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
     CUtensorMapSwizzle swizzle = CU_TENSOR_MAP_SWIZZLE_NONE;
 
-    // TMA dimensions: from fastest (0) to slowest (2)
+    // TMA 维度按地址变化从快（0）到慢（2）的顺序排列。
     uint64_t globalDim[3] = {dim_d, dim_h, dim_s};
 
-    // globalStrides are strides for dimensions 1, 2, must be in Bytes
+    // globalStrides 给出维度 1、2 的步长，单位必须是字节。
     uint64_t globalStrides[2] = {stride_h, stride_s};
 
     uint32_t boxDim[3] = {box_d, 1, box_s};
@@ -606,7 +622,7 @@ inline CUtensorMap create_3d_tensor_map(T *global_address,
 
     CUresult res = cuTensorMapEncodeTiled(&tmap,
                                           type,
-                                          3, // Rank = 3
+                                          3, // 张量维数为 3。
                                           global_address,
                                           globalDim,
                                           globalStrides,
@@ -648,6 +664,9 @@ inline CUtensorMap create_3d_tensor_map(T *global_address,
                                                        kv_head,                                                        \
                                                        scale);
 
+// 当前入口固定 BF16 和 head_dim=128；CHECK_T 不检查 dtype，也未完整验证所有形状。
+// kv_head 必须为正，q_head 应能被它整除；空 KV、超大尺寸和跨设备输入不在示例约定内。
+// 两个阶段依次提交到同一 CUDA 流，第二阶段读取第一阶段产生的 FP32 工作区。
 #define binding_tiled_tma_func_gen(NAME, HEAD_DIM, SMEM_TILE_COUNT, DISPATCH_MACRO)                                    \
     void NAME##_##HEAD_DIM(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, float scale) {          \
                                                                                                                        \
@@ -656,13 +675,13 @@ inline CUtensorMap create_3d_tensor_map(T *global_address,
         CHECK_T(v);                                                                                                    \
         CHECK_T(o);                                                                                                    \
                                                                                                                        \
-        /* Extract dimension info dynamically from Tensor */                                                           \
+        /* 从 Tensor 动态读取各维度大小。 */                                                           \
         const int q_head = q.size(0);                                                                                  \
         const int head_dim = q.size(1);                                                                                \
         const int kv_len = k.size(0);                                                                                  \
         const int kv_head = k.size(1);                                                                                 \
                                                                                                                        \
-        /* Only validate that head_dim matches the compile-time constant */                                            \
+        /* 此处只检查 head_dim 是否等于编译期常量。 */                                            \
         TORCH_CHECK(head_dim == HEAD_DIM, "Head dim mismatch: expected ", HEAD_DIM);                                   \
                                                                                                                        \
         int elem_bytes = k.element_size();                                                                             \
@@ -700,7 +719,7 @@ inline CUtensorMap create_3d_tensor_map(T *global_address,
         auto options = torch::TensorOptions().dtype(torch::kFloat32).device(q.device());                               \
         auto ws_lse = torch::empty({q_head, blocks_per_grid.x}, options);                                              \
         auto ws_o = torch::empty({q_head, blocks_per_grid.x, head_dim}, options);                                      \
-        /* launch kernel */                                                                                            \
+        /* 在当前 CUDA 流上启动核函数。 */                                                                                            \
         switch (chunk_size) {                                                                                          \
             case 64: DISPATCH_MACRO(NAME, HEAD_DIM, 64); break;                                                        \
             case 128: DISPATCH_MACRO(NAME, HEAD_DIM, 128); break;                                                      \
@@ -721,7 +740,7 @@ binding_tiled_tma_func_gen(flash_decode_tma, 128, 2, DISPATCH_TMA_KERNEL);
 binding_tiled_tma_func_gen(flash_decode_tma_dbf_k, 128, 3, DISPATCH_TMA_DBF_K_KERNEL);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // flash_decode_tma_128
+    // 导出 head_dim=128 的单缓冲与 K 双缓冲入口。
     torch_pybinding_func(flash_decode_tma_128);
     torch_pybinding_func(flash_decode_tma_dbf_k_128);
 }

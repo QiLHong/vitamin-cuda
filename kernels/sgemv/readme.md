@@ -1,23 +1,37 @@
 # GeMV
 
-## Overview
+[English](./readme.en.md) · [中文入门](../../docs/zh-CN/入门教程.md)
 
-GEMV (matrix–vector multiply) shows up whenever you map a feature vector to another dimension (wider or narrower). Batched GEMV is effectively a batched matmul, and most ML workloads use batching.
+> 本页翻译原文并补充源码导读；功能勾选沿用原作者的实现状态，性能数据为历史记录，本次未复测。
 
-This folder keeps a few small reference kernels for practice.
+## 概览
 
-- [x] gemv — FP32
-- [x] gemv_fp32x4 — FP32 with vectorized loads
-- [x] pytorch op bindings && diff check
+将一个特征向量映射到另一个维度（变宽或变窄）时，经常会用到 GEMV，即矩阵—向量乘法。对一批向量分别进行 GEMV，本质上也是批量的矩阵乘法；多数机器学习工作负载会使用批处理。
 
-## Run tests
+本目录保留了几个小型参考核函数，供练习使用。
+
+- [x] gemv — FP32 标量加载版本
+- [x] gemv_fp32x4 — FP32 向量化加载版本
+- [x] PyTorch 算子绑定与结果差异检查
+
+## 中文导读与使用前提
+
+输入为 `A[out_channels,in_channels]` 和向量 `b[in_channels]`，输出 `c[out_channels]`；测试用二维形状 `[in_channels,1]`、`[out_channels,1]` 表示向量，但核函数按连续的一维地址访问。
+
+`gemv` 用一个含 128 个线程的线程块处理一行，各线程沿输入维度跨步累加，再在线程束内和线程块内两级规约，最后由线程 0 写出结果。`gemv_fp32x4` 同时计算四行，线程每次读取四个相邻的 `b` 值并在四行间复用，随后分别规约四个和；`x4` 同时涉及宽加载和四行一组的输出映射。
+
+标量版本有输入维度的循环边界。四元素版本没有四行尾部判断，也没有保护不足四个元素的宽读取，因此入门使用须满足 `out_channels` 和 `in_channels` 均为 4 的正整数倍，相关首地址按 16 字节对齐。所有张量都应是同设备、连续、形状匹配的 FP32 数据，输出容量足够且无有害重叠。包装仅对 `a/b` 调用 `CHECK_T`，没有对 `c` 执行相同的设备和连续性检查，也没有完整检查矩阵形状；这些限制在译注中记录，原算法保持不变。
+
+从本目录执行下方命令，需要 CUDA、PyTorch、NumPy 和脚本导入的 FlashInfer 计时工具。`test.py` 使用 `bench_gpu_time`，开启冷 L2 计时、关闭 CUDA Graph，并取耗时的中位数；日志保留的 `mean time` 标签并不表示实际计算了均值。差异检查沿用 `atol=rtol=1e-4`。本次没有 CUDA 编译或 GPU 测试，以下输出是原作者保留的历史数据。
+
+## 运行测试
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
 
 ```bash
 ####################################################################################################

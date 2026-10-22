@@ -1,3 +1,6 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 计时并不验证采样分布；不同实现相同 seed 也不自动保证逐词元相同。
+# 当前 CUDA 源码的 BF16 路径存在按 FP16 解码的问题，详见 sampling.cu 与中文 README。
 import time
 from functools import partial
 from pathlib import Path
@@ -11,7 +14,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="sampling_lib",
     sources=[str(current_dir / "sampling.cu")],
@@ -31,6 +34,9 @@ lib = load(
 )
 
 # vllm/vllm/v1/sample/ops/topk_topp_sampler.py
+# 下方原始 docstring 保留，以维持 Python AST 与运行时 __doc__ 不变；中文说明如下：
+# 对 logits 应用 Top-K/Top-P 掩码。Top-P 会对 logits 排序，大批次可能较慢，且可能原地修改输入。
+# allow_cpu_sync=True 且只用 Top-K 时会调用 apply_top_k_only，但当前文件没有定义该函数。
 def apply_top_k_top_p_pytorch(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -49,31 +55,34 @@ def apply_top_k_top_p_pytorch(
             return logits
 
         if allow_cpu_sync:
-            # Avoid sorting vocab for top-k only case.
+            # 只需要 Top-K 时，避免对整个词表排序。
             return apply_top_k_only(logits, k)
 
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
-        # Apply top-k.
-        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # shape: B
-        # Get all the top_k values.
+        # 应用 Top-K 筛选。
+        top_k_mask = logits_sort.size(1) - k.to(torch.long)  # 形状为 B，即每个批次一项。
+        # 读取各批次第 k 大分数，作为 Top-K 筛选阈值。
         top_k_mask = logits_sort.gather(1, top_k_mask.unsqueeze(dim=1))
         top_k_mask = logits_sort < top_k_mask
         logits_sort.masked_fill_(top_k_mask, -float("inf"))
 
     if p is not None:
-        # Apply top-p.
+        # 应用 Top-P 累计概率筛选。
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
         top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
-        # at least one
+        # 至少保留一个候选。
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
-    # Re-sort the probabilities.
+    # 按原词表编号还原已筛选 logits 的位置；这里返回的是 logits，而非概率。
     return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
 
+# 原始 docstring 的中文说明：从概率中随机采样；原作者采用此实现以避免其所述的
+# torch.multinomial 同步开销。具体性能仍取决于版本与运行环境，本次未验证。
+# 对每个词元生成指数随机变量 q，再取 probs/q 最大项；与 CUDA 的 CDF 采样走不同随机数路径。
 def random_sample(
     probs: torch.Tensor,
     generators: dict[int, torch.Generator],
@@ -84,15 +93,15 @@ def random_sample(
     causes CPU-GPU synchronization.
     """
     q = torch.empty_like(probs)
-    # NOTE(woosuk): To batch-process the requests without their own seeds,
-    # which is the common case, we first assume that every request does
-    # not have its own seed. Then, we overwrite the values for the requests
-    # that have their own seeds.
+    # NOTE(woosuk)：为批量处理没有独立随机种子的请求（常见情况），
+    # 先按所有请求都没有独立种子的方式生成随机值；
+    # 随后对拥有独立种子的请求，
+    # 使用各自的生成器覆盖对应随机值。
     if len(generators) != probs.shape[0]:
         q.exponential_()
     if generators:
-        # TODO(woosuk): This can be slow because we handle each request
-        # one by one. Optimize this.
+        # TODO(woosuk)：这里逐个处理请求，
+        # 可能较慢，有待优化。
         for i, generator in generators.items():
             q[i].exponential_(generator=generator)
     return probs.div_(q).argmax(dim=-1).view(-1)
@@ -143,6 +152,8 @@ def generate_realistic_logits(bs, vocab_size, num_spikes=5, device="cuda", dtype
     
     return logits
 
+# 真实数据示例读取 ./data/qwen3_8b_logits/logits_0.npy 到 logits_4.npy，仓库未附这些文件。
+# 这些相对路径基于运行目录；默认 __main__ 调用本函数，因此先准备数据再运行。
 def test_on_real_logits():
     top_k = 20
     top_p = 0.95

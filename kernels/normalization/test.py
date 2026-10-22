@@ -1,3 +1,6 @@
+# 中文导读：比较逐行总体方差归一化；当前默认执行 test()，split-k 测试调用仍被注释。
+# 原公式没有 epsilon；随机输入通过不代表常量行和数值极端情况已经验证。
+# 本次只翻译和补充注释，未执行 CUDA 编译、GPU 正确性或性能测试。
 from functools import partial
 from pathlib import Path
 
@@ -10,7 +13,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 即时编译 CUDA 源文件并加载为 Python 扩展；首次执行需要可用的 CUDA 编译环境。
 lib = load(
     name="norm_lib",
     sources=[str(current_dir / "norm.cu")],
@@ -43,6 +46,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
 
     input_args = (a, b) if b is not None else (a,)
 
+    # 使用原设置预热、重复计时并启用 cold_l2_cache；不在本次翻译中改变测量条件。
     times = bench_gpu_time(
         fn=op,
         input_args=input_args,
@@ -52,6 +56,7 @@ def benchmark(op, a, b=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际统计量是中位数；输出中的英文 mean time 标签按原样保留。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -132,6 +137,7 @@ def test_split_k():
             diff_check(b, b_my, prefix="norm_fp32x4_split_k")
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行原有测试尺寸与基准流程。
     test()
+    # 需要单独验证 split-k 时应检查此入口；保留原有注释状态。
     # test_split_k()

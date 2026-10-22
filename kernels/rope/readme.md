@@ -1,23 +1,35 @@
-# Rope
+# RoPE（旋转位置编码）
 
-## Overview
+[英文原文](./readme.en.md) · [中文首页](../../README.md) · [翻译进度](../../docs/zh-CN/翻译进度.md)
 
-RoPE kernels.
+> 本页翻译并保留原始章节、命令与历史输出；本次仅修改文档和源码注释，未进行 CUDA 编译、GPU 正确性测试或性能复测。
 
-- [x] PyTorch naive RoPE
-- [x] PyTorch RoPE with cos/sin cache
-- [x] rope — FP32 (~10× vs naive PyTorch)
-- [x] rope_fp32x4 — vectorized FP32 (much faster still)
-- [x] pytorch op bindings && diff check
+## 概述
 
-## Run tests
+RoPE 核函数实现。
+
+- [x] PyTorch 朴素 RoPE 基准
+- [x] 使用 cos/sin 缓存的 PyTorch RoPE
+- [x] `rope`：FP32 版本；原作者概述称相对朴素 PyTorch 约有 10 倍加速，具体以历史配置为准
+- [x] `rope_fp32x4`：FP32 向量化版本；原作者进一步加速的实现，收益随输入配置变化
+- [x] PyTorch 算子绑定与结果差异检查
+
+## 中文阅读指引与输入限制
+
+[CUDA 实现](./rope_neox.cu) 使用 NeoX 布局：将前半维的 `x=a[...,i]` 与后半维的 `y=a[...,i+head_dim/2]` 配对，按角度 `pos / theta^(2*i/head_dim)` 计算 `(x*cos-y*sin, y*cos+x*sin)`。`theta=10000`，位置从 0 开始；接口没有单独的 `position_ids` 或 KV 缓存位置偏移参数。
+
+两个入口都按连续 FP32 `[bs,seq_len,head_dim]` 访问，线程块均包含 `head_dim/2` 个线程，均须满足设备每块线程数上限。标量 `rope` 每块处理一个位置，每线程处理一对元素，要求正偶数头维。`rope_fp32x4` 每线程处理四对、每块覆盖四个位置，要求 `head_dim` 为 8 的倍数、`seq_len` 为 4 的倍数及 16 字节对齐。其网格使用 `seq_len/4` 向下取整，没有尾部核函数，因此非整组的最后位置可能根本没有被调度。
+
+包装没有完整检查形状、同设备和输出大小。Python 基准只预建 `head_dim=128/256`、位置 0 到 8191 的 cos/sin 缓存；原 `rope()` 函数现算的 cos/sin 随后又被缓存覆盖，因此“朴素”与“缓存”基准并不是纯粹只差一项运算的对照。`test.py` 使用中位数计时，却沿用 `mean time` 标签；这些原行为都保持不变。
+
+## 运行测试
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
 
 ```bash
 [2/2] c++ rope_neox.cuda.o -shared -L/home/zhu/.venv/lib/python3.12/site-packages/torch/lib -lc10 -lc10_cuda -ltorch_cpu -ltorch_cuda -ltorch -ltorch_python -L/usr/local/cuda/lib64 -lcudart -o rope_lib.so

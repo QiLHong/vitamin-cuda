@@ -1,3 +1,6 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 本入口供 Nsight Compute 采集使用；分析器运行会改变计时条件，不能直接与普通计时混用。
+# 各入口的缓存容量和 dtype 限制见 softmax.cu；有边界判断不意味着任意行宽都支持。
 import time
 from functools import partial
 from typing import Optional
@@ -8,7 +11,7 @@ from torch.utils.cpp_extension import load
 torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="softmax_lib",
     sources=["softmax.cu"],
@@ -32,7 +35,7 @@ baseline = None
 
 def benchmark(op, a, b=None, warmup=0, rep=1, prefix="torch"):
     if b is not None:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             res = op(a, b)
         torch.cuda.synchronize()
@@ -40,7 +43,7 @@ def benchmark(op, a, b=None, warmup=0, rep=1, prefix="torch"):
         for i in range(rep):
             res = op(a, b)
     else:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             res = op(a)
         torch.cuda.synchronize()
@@ -133,6 +136,6 @@ def test_large():
             diff_check(b, b_my, prefix="softmax_splitk")
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行下面列出的核函数测试配置。
     # test_small()
     test_large()

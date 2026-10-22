@@ -1,26 +1,50 @@
-# reduce_sum
+# reduce_sum：求和规约
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-reduce-sum kernels.
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
 
-- [x] warp shuffle reduction
+## 概述
+
+将输入元素规约为一个总和的核函数。
+
+- [x] 使用线程束数据交换（Warp Shuffle）的规约
 - [x] reduce_sum — FP32 / FP16
-- [x] reduce_sum_fp16x2 — vectorized FP16
-- [x] reduce_sum_fp16x8_packed — vectorized FP16, packed r/w
+- [x] reduce_sum_fp16x2 — FP16 向量化
+- [x] reduce_sum_fp16x8_packed — FP16 向量化、打包读写
 - [x] reduce_sum — INT8
-- [x] reduce_sum_i8x16_packed — vectorized INT8, packed r/w
-- [x] reduce_sum_i8x16_packed_dp4a — INT8, packed r/w, `dp4a` (orders of magnitude vs naive Torch)
-- [x] reduce_sum_i8x64_packed_dp4a — INT8, packed r/w, `dp4a`
+- [x] reduce_sum_i8x16_packed — INT8 向量化、打包读写
+- [x] reduce_sum_i8x16_packed_dp4a — INT8、打包读写、`dp4a`（原说明称相对朴素 Torch 有数量级提升；仅代表原基准场景）
+- [x] reduce_sum_i8x64_packed_dp4a — INT8、打包读写、`dp4a`
 
-## Run tests
+## 中文导读与适用范围
+
+这里对整个输入求和，结果为一个元素；不是沿指定维度逐行求和。线程按网格步长遍历输入，先规约线程束内结果，再用共享内存合并各线程束，最后由每块一个线程原子加到清零的输出。浮点路径用 FP32 累加并将结果转换回输入 dtype；INT8 路径用 INT32 累加并返回 INT32。
+
+`dp4a` 将四个有符号字节分别与四个 1 相乘后累加到 INT32，因而可用于 INT8 求和。`0x01010101` 是四个字节的 1，不是将整段输入当作一个普通整数相乘。x64 版本每次加载四组 16 字节，用四个局部累加器累积后再合并。
+
+| 入口类别 | 每线程每次处理的元素数 | 长度与对齐约定 |
+| --- | --- | --- |
+| 浮点/INT8 标量入口 | 1 | 循环逐元素检查范围；仍需有效的非空输入 |
+| FP32x4 | 4 | 元素数为 4 的正整数倍，地址按 16 字节对齐 |
+| FP16x2 | 2 | 元素数为 2 的正整数倍，地址按 4 字节对齐 |
+| FP16x8、INT8x16 | 8 / 16 | 元素数为相应组大小的正整数倍，地址按 16 字节对齐 |
+| INT8x64 | 64 | 元素数为 64 的正整数倍，地址按 16 字节对齐 |
+
+向量循环只检查组起点，未实现非整组尾部处理。INT8 包装未检查输入 dtype，而是直接将地址解释为 `int8_t*`；不能传入任意 dtype。INT32 的求和范围有限，不能把它等同于 PyTorch 默认 INT64 整数求和。浮点原子加的顺序、FP16 返回转换、整型范围及空输入都需要独立验证，本次只补说明。
+
+## 运行测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
+
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
 
 ```bash
 ####################################################################################################

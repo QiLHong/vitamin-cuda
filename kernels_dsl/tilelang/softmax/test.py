@@ -1,3 +1,5 @@
+# 中文导读：TileLang 两遍 Softmax，一块处理一行，首遍在线合并统计量，次遍输出。
+# 下方相对路径导入会加载 CUDA Softmax 扩展；需从本目录运行并安装相应依赖。
 from functools import partial
 import time
 import torch
@@ -10,7 +12,8 @@ sys.path.append("../../../")
 from kernels.softmax.test import lib, benchmark
 
 
-# make sure dim are power of 2
+# 原注释要求 dim 为 2 的幂；实际测试还包含 114688 等 8192 的整倍数。
+# 当前分块上限为 8192，未显式对尾块无效元素填 -inf；不要据函数签名假定任意 dim 都已验证。
 @tl.jit()
 def softmax_tilelang(bs, dim, dtype: T.dtype = T.float32):
     block_size = 256
@@ -34,6 +37,7 @@ def softmax_tilelang(bs, dim, dtype: T.dtype = T.float32):
             m_global = T.alloc_fragment([1], accum_dtype)
             d_global = T.alloc_fragment([1], accum_dtype)
 
+            # 沿一行的各输入分块维护当前最大值 m 与相对该最大值的指数和 d；统计量使用 FP32。
             m_global[0] = T.min_value(accum_dtype)
             d_global[0] = 0.0
 
@@ -45,11 +49,12 @@ def softmax_tilelang(bs, dim, dtype: T.dtype = T.float32):
                     x_exp[y_id] = T.exp(x[y_id] - m_local[0])
                 T.reduce_sum(x_exp, d_local, dim=0, clear=True)
 
-                # update m_global, sglobal
+                # 合并局部最大值与指数和：换到共同的新最大值后重新缩放两部分。
                 new_m = T.max(m_global[0], m_local[0])
                 d_global[0] = d_global[0] * T.exp(m_global[0] - new_m) + d_local[0] * T.exp(m_local[0] - new_m)
                 m_global[0] = new_m
 
+            # 第二遍重新读取输入，用全行最终的 m/d 归一化后写回。
             for by in T.Pipelined(0, tiling_num):
                 T.copy(X[bx, by * tiling_size : (by + 1) * tiling_size], x)
 
@@ -102,6 +107,7 @@ def test_small():
             diff_check(b, b_my, prefix="tl.float16")
 
 
+# 原始长行测试可能分配很大的张量；这不是小规模冒烟入口。
 def test_large():
     ns = [4]
     ms = [

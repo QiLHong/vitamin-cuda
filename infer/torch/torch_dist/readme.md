@@ -1,39 +1,43 @@
-# Distributed Inference with PyTorch from First Principles: DP, TP, and PP in Less Than 200 Lines
+# 用不到 200 行核心 PyTorch 代码理解分布式推理：DP、TP 与 PP
+
+[中文首页](../../../README.md) · [英文原文](./readme.en.md) · [原有中文文章](./readme_cn.md)
+
+本页逐段翻译原英文文档，代码块与历史输出原样保留；原有 `readme_cn.md` 未修改。
 >
-> Note: Text translated by AI. Code crafted by human.
+> 原文说明：文章由 AI 翻译，代码由作者编写。此中文分支保留原始英文文件与原有中文文章。
 >
 
-## 0. Preface
+## 0. 前言
 
-Models keep getting bigger. Even if INT4 quantization squeezes the weights onto a single GPU, inference still has to pay for KV cache and activations, both of which scale with batch size and sequence length. In practice, single-GPU inference quickly hits the VRAM wall. Multi-GPU distributed inference is no longer optional.
+模型越来越大。即使 INT4 量化让权重能够放进单张 GPU，推理仍需为 KV 缓存和激活值分配显存，而这些开销会随 batch 大小和序列长度增长。单卡很容易达到显存上限，这也是使用多卡分布式推理的重要动机。
 
-The problem is that if you jump straight into Megatron-LM, DeepSpeed, vLLM, or SGLang source code, the engineering layers can bury the core ideas. So this note does the opposite: strip everything down to the bare minimum and rebuild the three canonical inference parallelism strategies directly with PyTorch distributed primitives.
+直接阅读 Megatron-LM、DeepSpeed、vLLM 或 SGLang 源码时，大量工程封装可能遮住核心思路。本文把例子压缩到最基本的组成，直接用 PyTorch 分布式通信原语实现三种典型的推理并行策略。
 
-The demo uses:
+演示使用：
 
-- a tiny two-layer `Linear` model
-- 2 GPUs
-- less than 200 lines of core code
+- 一个简单的两层 `Linear` 模型
+- 2 张 GPU
+- 不到 200 行核心代码
 
-From that, we build and benchmark:
+在此基础上构建并比较：
 
-- Data Parallelism (DP)
-- Tensor Parallelism (TP)
-- Pipeline Parallelism (PP)
+- 数据并行（DP）
+- 张量并行（TP）
+- 流水线并行（PP）
 
-Full code: [vitamin-cuda torch_dist]((https://github.com/WingEdge777/vitamin-cuda/tree/main/infer/torch/torch_dist))
+完整代码：[vitamin-cuda torch_dist](https://github.com/WingEdge777/vitamin-cuda/tree/main/infer/torch/torch_dist)；本分支对应文件为 [test.py](./test.py)。
 
-Environment:
+原文列出的环境：
 
-- PyTorch >= 2.0
-- 2 NVIDIA GPUs
-- NCCL backend
+- PyTorch >= 2.0（宽泛的原文条件，具体 API 兼容性见下方译注）
+- 2 张 NVIDIA GPU
+- NCCL 通信后端
 
-I recommend using NVIDIA's NGC PyTorch container if you want the least friction.
+原作者建议使用 NVIDIA NGC PyTorch 容器以减少环境配置工作；仍需核对实际脚本调用的 API。
 
-## 1. Distributed Setup and Communication Basics
+## 1. 分布式初始化与通信基础
 
-### 1.1 Process Group Initialization
+### 1.1 初始化进程组
 
 ```python
 import os
@@ -51,13 +55,13 @@ def cleanup_dist():
     dist.destroy_process_group()
 ```
 
-Three terms matter here:
+需要理解三个术语：
 
-- `rank`: process id, either `0` or `1` in this demo
-- `world_size`: total number of processes, fixed to `2`
-- `NCCL`: NVIDIA's high-performance communication backend for GPU collectives and P2P
+- `rank`：进程在通信组中的编号，本例为 `0` 或 `1`
+- `world_size`：进程总数，本例固定为 `2`
+- `NCCL`：NVIDIA 的 GPU 集合通信与点对点通信后端
 
-### 1.2 Launching Multiple Processes
+### 1.2 启动多个进程
 
 ```python
 import torch.multiprocessing as mp
@@ -77,16 +81,16 @@ mp.spawn(
 )
 ```
 
-One important detail: create the model and input on CPU in the parent process, then move them to GPU inside each child process. Sharing CUDA state across `mp.spawn` workers is the wrong mental model and usually ends badly.
+本例在父进程的 CPU 上创建模型和输入，再由各子进程移动到自己的 GPU。不要把 `mp.spawn` 理解为多个工作进程直接共享父进程的 CUDA 执行状态。
 
-### 1.3 Communication Primitives Used in This Demo
+### 1.3 本例使用的通信原语
 
-| Primitive | Type | Purpose |
+| 原语 | 类型 | 用途 |
 | --- | --- | --- |
-| `all_gather` | collective | gather shards from all ranks |
-| `all_reduce` | collective | reduce values across all ranks, then broadcast result |
-| `isend` / `irecv` | point-to-point | asynchronous send and receive |
-| `batch_isend_irecv` | point-to-point | submit multiple P2P ops in one call |
+| `all_gather` | 集合通信 | 收集所有 rank 的数据分片 |
+| `all_reduce` | 集合通信 | 跨 rank 规约，并让各 rank 得到结果 |
+| `isend` / `irecv` | 点对点通信 | 异步发送与接收 |
+| `batch_isend_irecv` | 点对点通信 | 一次调用提交一组 P2P 操作 |
 
 ```text
 all_gather:
@@ -107,7 +111,7 @@ Rank 0               Rank 1
   │                    │
 ```
 
-## 2. The Toy Model
+## 2. 演示模型
 
 ```python
 class TwoLayerModel(nn.Module):
@@ -125,13 +129,13 @@ class TwoLayerModel(nn.Module):
         return self.layers[1](x)
 ```
 
-I use `ModuleList` so later we can slice layers cleanly for pipeline parallelism. I also set `bias=False` so tensor parallelism stays focused on the main weight sharding logic instead of bias bookkeeping.
+模型使用 `ModuleList`，方便后续按层切分进行流水线并行。设置 `bias=False`，使张量并行示例能够集中解释权重分片，不引入额外的偏置处理。
 
-## 3. Data Parallelism (DP)
+## 3. 数据并行（DP）
 
-### 3.1 Core Idea
+### 3.1 核心思路
 
-Each GPU holds a full copy of the model. The batch is split across ranks. Every rank computes on its own shard, then all partial outputs are gathered back together.
+每张 GPU 持有完整模型副本，把一个 batch 切给不同 rank。各 rank 计算自己的输入分片，最后收集并拼接输出。
 
 ```text
         Input [B, H]
@@ -155,7 +159,7 @@ Each GPU holds a full copy of the model. The batch is split across ranks. Every 
        Output [B, H]
 ```
 
-### 3.2 Implementation
+### 3.2 实现
 
 ```python
 class DPModel(nn.Module):
@@ -178,23 +182,23 @@ class DPModel(nn.Module):
         return torch.cat(self.gathered, dim=0)
 ```
 
-What matters:
+实现要点：
 
-- each rank only computes its own batch slice
-- output buffers are allocated lazily from the real output shape
-- `all_gather` reconstructs the full batch output
+- 每个 rank 只计算自己负责的 batch 切片
+- 输出收集缓冲区在首次使用时按实际输出形状分配
+- `all_gather` 重建完整 batch 的输出
 
-For inference, this is the right mental model for DP.
-For training, classic `DistributedDataParallel` is a different story: the key communication becomes gradient `all_reduce`, not output `all_gather`.
+这是本例推理数据并行的工作方式。
+训练中的经典 `DistributedDataParallel` 有不同的通信重点：主要通过梯度 `all_reduce` 同步更新所需信息。
 
-## 4. Tensor Parallelism (TP)
+## 4. 张量并行（TP）
 
-### 4.1 Core Idea
+### 4.1 核心思路
 
-Tensor parallelism splits the weights themselves.
+张量并行直接切分权重。
 
-- Column Parallel Linear: shard output features
-- Row Parallel Linear: shard input features, then `all_reduce` the partial sums
+- 列并行线性层：切分输出特征
+- 行并行线性层：切分输入特征，再用 `all_reduce` 汇总部分和
 
 ```text
 Column Parallel Linear:
@@ -222,16 +226,16 @@ X [B,H] ─split─> X_0 [B,H/2]    X_1 [B,H/2]
                       Output [B, H]
 ```
 
-The elegant part is the composition:
+两种切分方式可以自然衔接：
 
-- column-parallel layer produces `[B, H/2]` on each rank
-- row-parallel layer naturally consumes exactly that shard
-- no communication is needed between the two layers
-- only the final `all_reduce` is required
+- 列并行层在各 rank 上产生 `[B, H/2]` 输出
+- 行并行层恰好以这个分片作为输入
+- 两层之间无需交换这些中间分片
+- 只需在第二层末尾执行 `all_reduce`
 
-This is the same structural pattern used in real LLM blocks, especially around QKV projections and output projections.
+这种结构也常用于 LLM 模块的 QKV 投影与输出投影。
 
-### 4.2 Implementation
+### 4.2 实现
 
 ```python
 class ColumnParallelLinear(nn.Module):
@@ -276,14 +280,14 @@ class TPModel(nn.Module):
         return self.fc2(torch.relu(self.fc1(x)))
 ```
 
-If you only remember one thing from this section, remember this:
-**column-parallel + row-parallel is the canonical TP pairing.**
+本节需要抓住的组合关系是：
+**列并行与行并行是常见的 TP 配对方式。**
 
-## 5. Pipeline Parallelism (PP)
+## 5. 流水线并行（PP）
 
-### 5.1 Core Idea
+### 5.1 核心思路
 
-Pipeline parallelism splits the model by layers. Activations flow from one rank to the next like a production line.
+流水线并行按层切分模型，让激活值依次流过不同 rank。
 
 ```text
 Time T0:
@@ -307,20 +311,20 @@ Time T1:
      └── irecv   final output
 ```
 
-This is simple to understand, but it comes with a cost: pipeline bubbles.
+这种顺序依赖会带来流水线气泡，即部分阶段等待而空闲。
 
-While rank 0 is busy, rank 1 waits.
-Then rank 1 is busy, while rank 0 waits.
-With only two stages, the idle fraction can be painfully obvious, which is exactly why PP often shows worse latency than TP in small demos like this one.
+rank 0 计算时，rank 1 等待输入。
+随后 rank 1 计算，rank 0 又等待结果。
+在本例只有两个阶段、没有微批次重叠时，空闲时间很明显；这解释了为什么这种小型演示中的 PP 延迟可能差于 TP。
 
-In real systems, people attack the bubble with micro-batching:
+实际系统通常借助微批次减少气泡：
 
-- training side: schedules like `1F1B`
-- inference side: chunked prefill or continuous forward micro-batches
+- 训练侧：例如 `1F1B`（一次前向、一次反向）调度
+- 推理侧：分块预填充或连续派发前向微批次
 
-The principle is the same: keep every stage fed.
+共同目标是让各阶段持续有任务可处理。
 
-### 5.2 Implementation
+### 5.2 实现
 
 ```python
 class PPModel(nn.Module):
@@ -380,24 +384,26 @@ class PPModel(nn.Module):
             return None
 ```
 
-### 5.3 Why `batch_isend_irecv` Instead of `dist.send()` / `dist.recv()`?
+### 5.3 为什么使用 `batch_isend_irecv`？
 
-Two reasons:
+原文给出以下两个理由；有关 API 支持情况的概括需要结合译注理解：
 
-1. NCCL does not support the blocking `send` / `recv` API path the way people often expect.
-2. `batch_isend_irecv` is the PyTorch-recommended NCCL P2P interface, and it scales better to real pipeline schedules where one rank may need to post multiple sends and receives without deadlocking.
+1. 原文认为，NCCL 的阻塞 `send` / `recv` 路径与一些使用者的预期不同。
+2. 原文采用 `batch_isend_irecv` 作为 NCCL P2P 接口，便于扩展到需要同时提交多次收发的流水线调度，协调操作顺序。
 
-Even though this demo submits only one op at a time, the wrapper keeps the code aligned with real-world practice.
+虽然本例每次只提交一个操作，这层包装仍保留了批量接口的形式。
 
-## 6. Benchmark
+> 译注：[PyTorch 分布式文档](https://docs.pytorch.org/docs/stable/distributed.html)的支持表列出 NCCL GPU 的 `send` / `recv` 支持，因此不能把原文概括为“NCCL 只支持异步接口”。`batch_isend_irecv` 也不会自动消除所有死锁；对端收发顺序、设备选择与参与进程仍需匹配。本示例在返回的 Work 上立即 `wait()`，没有实现微批次流水重叠。
 
-Run:
+## 6. 基准测试
+
+在本目录运行：
 
 ```bash
 python test.py
 ```
 
-Sample output:
+原始历史输出（不是本次运行结果）：
 
 ```text
 ==================================================
@@ -421,44 +427,52 @@ Demo 3: PP
 [PP] Output match reference: True, Avg time: 11.032 ms
 ```
 
-The exact numbers will vary by GPU and software stack, but the trend is the interesting part:
+具体数值随 GPU 与软件环境变化。原文对这组历史结果的解读是：
 
-- DP helps because the batch is split cleanly
-- TP helps because compute and parameter storage are partitioned
-- PP suffers because the toy example has obvious bubbles and no micro-batch overlap
+- DP 通过切分 batch 分担计算
+- TP 通过切分计算和参数存储分担工作
+- 本例 PP 受明显气泡影响，且没有微批次重叠
 
-## 7. DP vs. TP vs. PP
+## 7. DP、TP、PP 对照
 
-| Dimension | DP | TP | PP |
+| 维度 | DP | TP | PP |
 | --- | --- | --- | --- |
-| What is sharded | data | parameters | layers |
-| Model replica | full | partial | partial |
-| Memory footprint | high | low | low |
-| Main communication | `all_gather` | `all_reduce` | `isend` / `irecv` |
-| Communication cadence | once per inference | once per TP reduction point | once per stage handoff |
-| Best fit | smaller model, larger batch | wide hidden layers, tight latency | very deep models |
-| Latency behavior | usually good | usually good | bubble-prone |
+| 切分对象 | 数据 | 参数 | 层 |
+| 每卡模型内容 | 完整副本 | 部分参数 | 部分层 |
+| 模型存储开销（原文概括） | 较高 | 较低 | 较低 |
+| 本例主要通信 | `all_gather` | `all_reduce` | `isend` / `irecv` |
+| 通信时机 | 每次推理收集输出 | 每个 TP 规约点 | 阶段交接时 |
+| 原文概括的适用情况 | 模型较小、batch 较大 | 隐藏层较宽、延迟要求较高 | 模型很深 |
+| 延迟特征（依具体实现） | 通常较好 | 通常较好 | 易受流水线气泡影响 |
 
-Practical rule of thumb:
+原文给出的经验选择：
 
-- use DP when the model already fits and you want throughput
-- use TP when one layer is too wide for one GPU
-- use PP when the model depth forces a layer-wise split
+- 模型能单卡容纳且需要吞吐时考虑 DP
+- 单层过宽、单卡难以容纳时考虑 TP
+- 模型过深而需要按层分配时考虑 PP
 
-For real LLM serving, these strategies are usually combined rather than used alone:
+实际 LLM 服务通常组合使用这些策略：
 
-- `TP + PP` for giant models
-- `DP` for higher request throughput
+- 用 `TP + PP` 分布超大模型
+- 用 `DP` 提高请求吞吐量
 
-During prefill, TP is especially useful for lowering time-to-first-token.
-During decode, TP also helps distribute the KV cache footprint across multiple GPUs, which is often just as important as splitting the math.
+在预填充阶段，TP 可用于降低首词元延迟，效果仍取决于计算规模与通信成本。
+在解码阶段，合适的 TP 头部切分也可把 KV 缓存分摊到多卡，这可能与切分计算同样重要；具体分布取决于注意力结构和框架实现。
 
-## 8. Final Notes
+## 8. 延伸阅读
 
-This demo is intentionally limited to a single node with 2 GPUs, because the goal is conceptual clarity, not cluster orchestration. In production, the same ideas extend to multi-node setups through `torchrun`, NCCL environment variables, and usually RDMA-capable networking such as InfiniBand or RoCE.
+本演示限定为单机两卡，以便清楚展示概念。生产环境可结合 `torchrun`、NCCL 环境配置和网络条件扩展到多节点；InfiniBand、RoCE 等支持 RDMA 的网络常用于降低跨节点通信成本，但集群部署不在本文范围内。
 
-Understanding the communication pattern is only step one. Once tensors land on a single GPU, the next question is harder and more interesting: how do you push the hardware to its limit with custom kernels?
+理解通信模式后，还可以继续研究张量在单张 GPU 上的执行方式，以及如何用自定义核函数优化计算。
 
-That is exactly what modern inference systems do. Frameworks like vLLM and SGLang do not stop at distributed scheduling. They also wrap highly optimized custom kernels as PyTorch ops.
+vLLM、SGLang 等推理框架也会把优化后的自定义核函数封装为 PyTorch 算子，与分布式调度配合。
 
-If that direction interests you, browse Github [vitamin-cuda](https://github.com/WingEdge777/vitamin-cuda). This project is full of hand-written CUDA kernels and low-level experiments built for exactly that purpose.
+相关手写 CUDA 核函数与底层实验可继续阅读作者的 GitHub 项目 [vitamin-cuda](https://github.com/WingEdge777/vitamin-cuda)。
+
+## 本分支补充：按实际脚本理解范围
+
+`test.py` 固定 `world_size=2`、两层同宽线性层与固定 batch。DP 的整数切分需要 batch 可被进程数整除；TP 的特征维也需要相应整除。PP 的接收缓冲与输入形状相同，不能直接套到层宽变化的任意模型。PyTorch 的 `weight` 存储顺序是 `[out_features, in_features]`：列并行在这块张量上切第 0 维，行并行切第 1 维。
+
+原环境说明 `PyTorch >=2.0` 并不是对每个后续版本的兼容保证。源码使用 `init_process_group(..., device_id=rank)`，请核对安装版本对该参数及整数设备编号的支持。参考 [PyTorch 进程组初始化文档](https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group)。
+
+`benchmark` 的 `allclose` 结果只被打印，不会在 False 时断言失败；应主动查看输出，不能以进程退出成功代替正确性验证。历史性能表是此演示的结果，不是各种真实 LLM、网络拓扑与 batch 下的固定排序。本次未执行 CUDA、多 GPU/NCCL 正确性或性能测试。

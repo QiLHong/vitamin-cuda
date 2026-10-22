@@ -10,7 +10,7 @@
 
 [英文原文](./README.en.md) · [零基础教程](./docs/zh-CN/入门教程.md) · [术语对照](./docs/zh-CN/术语表.md) · [翻译进度与验证范围](./docs/zh-CN/翻译进度.md)
 
-**分支说明：** 本分支为 `zh-cn-beginner`，以 `main` 的 `ca40342f985a95be615585e02c130e13040f0e02` 为翻译基线。原作者、上游链接和 MIT 许可证保留。中文化逐模块进行，**下面的 `[x]` 表示原项目已实现该功能，不表示该模块已经完成中文翻译**；具体覆盖范围见进度文档。原始算法、函数名、编译参数、测试尺寸与英文运行输出不因翻译而修改。
+**分支说明：** 中文学习目标分支为 `zh-cn-beginner`，原算法基线为 `ca40342f985a95be615585e02c130e13040f0e02`，本轮续译从 `520f97093a2abc239977be83d244b327d0e2e2ef` 开始。当前基线的全部模块文档与源码普通自然语言注释已按[进度表的范围与保留规则](./docs/zh-CN/翻译进度.md)完成中文覆盖，另保留英文对照和原有中文文章。原作者、上游链接和 MIT 许可证保留。**下面的 `[x]` 沿用原项目的功能清单，不表示任意输入都正确或本次运行测试通过**。原始算法、函数名、编译参数、测试尺寸、Python docstring 与运行输出不因翻译而修改。
 
 Vitamin-CUDA 汇集了原作者介绍的 **170 多个手工优化 CUDA 核函数及变体**，从面向初学者的基本线程索引与网格步进循环，到面向性能研究的异步 TMA 流水线，覆盖 SGEMM、HGEMM、Flash Attention 和 Flash Decoding 等方向。项目通过 PyTorch C++ 扩展连接 Python 与 CUDA，便于比较输出和性能。
 
@@ -24,6 +24,8 @@ Vitamin-CUDA 汇集了原作者介绍的 **170 多个手工优化 CUDA 核函数
 2. [`kernels/elementwise/elementwise.cu`](./kernels/elementwise/elementwise.cu)：从一个线程处理一个数，到 `half2`、`float4` 和打包读写。
 3. [`kernels/common/pack.cuh`](./kernels/common/pack.cuh)：理解字节数、内存对齐、类型重解释及共用存储。
 4. [`kernels/elementwise/test.py`](./kernels/elementwise/test.py)：理解即时编译、预热、基准测量和正确性检查。
+
+继续阅读时，可用[激活函数对比](./docs/zh-CN/激活函数对比.md)连接 ReLU、Sigmoid、ELU、GELU、Hardswish、ReLU6 与 SiLU，再从[模块完成表](./docs/zh-CN/翻译进度.md)进入规约、归一化、矩阵乘法、注意力、采样、DSL、推理和硬件实验。各模块 README 都区分原始历史输出、源码可见的限制与尚未执行的验证。
 
 **不要直接把原性能测试改成任意奇数尺寸。** 部分向量化实现有对齐及整块大小限制，且包装函数没有完整验证输入。中文注释会指出这些限制，但不会把文档提交伪装成算法修复。
 

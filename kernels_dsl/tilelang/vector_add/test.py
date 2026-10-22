@@ -1,3 +1,5 @@
+# 中文导读：并列比较 Triton、TileLang 与手写 CUDA 加法，保留全部基准参数。
+# 导入 kernels.elementwise.test 会编译 CUDA 扩展；从本目录执行以匹配相对搜索路径。
 import sys
 from functools import partial
 import torch
@@ -13,7 +15,7 @@ sys.path.append("../../../")
 from kernels.elementwise.test import lib
 
 
-# triton
+# Triton 对照：完整块直接读写，末块使用 offsets<n 掩码。
 @triton.jit
 def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(axis=0)
@@ -34,7 +36,7 @@ def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK_SIZE: tl.constexpr):
         tl.store(out_ptr + offsets, out, mask=mask)
 
 
-# tilelang
+# TileLang 基础版：把每个元素的加法交给 T.Parallel 映射到线程。
 @tilelang.jit
 def add_tilelang(N: int, block: int = 256, dtype: str = "float16"):
 
@@ -52,6 +54,8 @@ def add_tilelang(N: int, block: int = 256, dtype: str = "float16"):
     return main
 
 
+# 显式向量化：每线程负责 vec=8 个连续元素，完整组与尾部分别走不同循环。
+# 对 base>=N 的线程，尾部循环的处理取决于 DSL 生成结果，需要在实际工具链检查。
 @tilelang.jit
 def add_tilelang_vectorized(N: int, block: int = 256, dtype: str = "float16"):
     vec = 8
@@ -81,6 +85,8 @@ def add_tilelang_vectorized(N: int, block: int = 256, dtype: str = "float16"):
     return main
 
 
+# 即时调用形式：N 从输入推断。vec 按位宽计算，但完整组判断仍硬编码 base+7。
+# 当前演示使用 float16；不要把可选 dtype 参数理解为所有位宽均已验证。
 @tilelang.jit
 def add_tilelang_vectorized_eager(
     A: torch.Tensor,
@@ -109,6 +115,8 @@ def add_tilelang_vectorized_eager(
                 elem = base + i
                 C[elem] = A[elem] + B[elem]
 
+# 共享内存版本先搬运两份输入，再经 fragment 计算并写回。
+# 本实验用于比较 DSL 生成策略，不意味着简单加法天然需要共享内存。
 @tilelang.jit
 def elementwise_add(A, B, C, block_N=2048, dtype="float16", threads=256):
     N = T.const("N")
@@ -132,6 +140,7 @@ def elementwise_add(A, B, C, block_N=2048, dtype="float16", threads=256):
 
     # return C
 
+# 去掉显式共享内存：虽然变量仍叫 A_shared/B_shared，实际分配的是 fragment。
 @tilelang.jit
 def elementwise_add_no_shared(A, B, C, block_N=2048, dtype="float16", threads=256):
     N = T.const("N")
@@ -168,9 +177,10 @@ def benchmark(op, x, y, o=None, prefix="torch"):
             dry_run_iters=10,
             repeat_iters=100,
             enable_cupti=False,
-            use_cuda_graph=False,  # pure CUDA-event timer
+            use_cuda_graph=False,  # 使用 CUDA 事件计时，不使用 CUDA Graph
             cold_l2_cache=cold,
         )
+        # 统计中位数；下面原输出字符串写 mean time，保持原样以方便与上游对照。
         return float(np.median(times))
 
     avg_duration = measure(op, x, y, o, cold=True)
@@ -264,6 +274,7 @@ def test_all():
         diff_check(out, out_my, prefix="elementwise_add_fp16x8_packed")
 
 
+# 专门比较整组长度以及前后各差一个元素的长度；通过情况仍以实际运行结果为准。
 def test_sp():
     torch.manual_seed(42)
     DEVICE = torch.device("cuda")
@@ -342,6 +353,7 @@ def test_sp():
         diff_check(out, out_my, prefix="elementwise_add_fp16x8_packed")
 
 
+# 原入口只运行 test_sp；test_all 保留为可选入口，未在翻译中改变默认执行范围。
 if __name__ == "__main__":
     # test_all()
     test_sp()

@@ -1,3 +1,6 @@
+# 中文导读：比较带权重的均方根归一化；原 diff_check 检查平均绝对误差。
+# 平均误差阈值不等于每个元素都满足该阈值，原测试范围和判定保持不变。
+# 本次只翻译和补充注释，未执行 CUDA 编译、GPU 正确性或性能测试。
 from functools import partial
 from pathlib import Path
 
@@ -10,7 +13,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 即时编译 CUDA 源文件并加载为 Python 扩展；首次执行需要可用的 CUDA 编译环境。
 lib = load(
     name="rmsnorm_lib",
     sources=[str(current_dir / "rmsnorm.cu")],
@@ -29,7 +32,7 @@ lib = load(
 )
 
 
-def rmsnorm(x, weight, dim=1, eps=1e-6, out=None):  # [n, dim], [dim]
+def rmsnorm(x, weight, dim=1, eps=1e-6, out=None):  # 输入形状为 [n, dim]，权重形状为 [dim]。
     out = x * torch.rsqrt(x.pow(2).mean(dim, keepdim=True) + eps) * weight
     return out
 
@@ -40,6 +43,7 @@ baseline = None
 def benchmark(op, a, b, warmup=10, rep=100, prefix="torch"):
     input_args = (a, b)
 
+    # 使用原设置预热、重复计时并启用 cold_l2_cache；不在本次翻译中改变测量条件。
     times = bench_gpu_time(
         fn=op,
         input_args=input_args,
@@ -49,6 +53,7 @@ def benchmark(op, a, b, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际统计量是中位数；输出中的英文 mean time 标签按原样保留。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -68,7 +73,7 @@ def diff_check(a, b, prefix="torch", eps=1e-4):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行原有测试尺寸与基准流程。
     device = torch.device("cuda")
     bs = [256, 1024, 2048, 4096]
     sz = [2048, 4096, 8192]

@@ -1,3 +1,6 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 自定义输入使用 [batch,seq,head,dim]，PyTorch 基准在调用前转为 [batch,head,seq,dim]。
+# 性能数字按脚本内的运算量公式估算；不能据此推断全部注意力算子的实际硬件指令数。
 import math
 import time
 from functools import partial
@@ -12,7 +15,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="flash_attn",
     sources=[str(current_dir / "flash_attn.cu")],
@@ -38,7 +41,7 @@ baseline = None
 def benchmark(op, q, k, v, o=None, warmup=10, rep=100, prefix="torch"):
     if o is not None:
         scale = 1 / math.sqrt(q.shape[-1])
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             op(q, k, v, o, scale)
         torch.cuda.synchronize()
@@ -50,7 +53,7 @@ def benchmark(op, q, k, v, o=None, warmup=10, rep=100, prefix="torch"):
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             o = op(q, k, v)
         torch.cuda.synchronize()
@@ -63,7 +66,7 @@ def benchmark(op, q, k, v, o=None, warmup=10, rep=100, prefix="torch"):
     duration = time.perf_counter() - start
 
     if prefix == "torch":
-        # tflops ~= 2*b*q_h*s_q*s_kv*dim
+        # 运算量估算采用 2*b*q_h*s_q*s_kv*dim；下方再换算为 TFLOP/s。
         tflops = (
             2
             * q.shape[0]
@@ -81,7 +84,7 @@ def benchmark(op, q, k, v, o=None, warmup=10, rep=100, prefix="torch"):
             f"{prefix:40s} mean time: {duration / rep * 1000:8.6f} ms, {tflops:.2f} tflops"
         )
     else:
-        # tflops ~= 2*b*q_h*s_q*s_kv*dim
+        # 运算量估算采用 2*b*q_h*s_q*s_kv*dim；下方再换算为 TFLOP/s。
         tflops = (
             2
             * q.shape[0]

@@ -1,3 +1,9 @@
+/*
+ * 中文导读：对两个等长数组计算点积，线程局部累加后做块内规约，再原子加到输出。
+ * FP32 工作区从零开始，返回时转换为 a 的 dtype；浮点原子加的顺序可能影响末位舍入。
+ * 两输入需同 dtype、同设备且长度一致，当前包装未验证所有关系。
+ * 向量版本只检查组起点，长度需是对应组大小的正整数倍；打包访问还需正确对齐。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -12,6 +18,7 @@
 
 #include "../common/pack.cuh"
 
+// XOR 交换逐轮合并规约值；使用完整线程束掩码，调用点需保证相应线程参与。
 template <const int warp_size = WARP_SIZE, typename T>
 __device__ __forceinline__ T _warp_shuffle_reduce(T x) {
 #pragma unroll
@@ -21,7 +28,7 @@ __device__ __forceinline__ T _warp_shuffle_reduce(T x) {
     return x;
 }
 
-// fp32
+// 标量入口：模板也用于 FP16；乘法在转为 float 之前发生。
 template <const int block_size = 256, typename T>
 __global__ void dot_product_kernel(T *a, T *b, float *c, int N) {
     int tid = threadIdx.x;
@@ -37,6 +44,7 @@ __global__ void dot_product_kernel(T *a, T *b, float *c, int N) {
     int warp_id = tid / WARP_SIZE;
     __shared__ float smem[num_warp];
 
+    // 先在线程束内规约；lane 0 发布部分和，屏障保证第一线程束能读取所有部分和。
     sum = _warp_shuffle_reduce<WARP_SIZE>(sum);
     if (lane_id == 0) {
         smem[warp_id] = sum;
@@ -53,6 +61,8 @@ __global__ void dot_product_kernel(T *a, T *b, float *c, int N) {
     }
 }
 
+// FP32x4：每线程每轮读取四对元素，做四次乘法后加入 FP32 局部和。
+// float4 要求 16 字节对齐，i<N 不会保护最后一组内的其余三个元素。
 template <const int block_size = 256>
 __global__ void dot_product_fp32x4_kernel(float *a, float *b, float *c, int N) {
     int tid = threadIdx.x;
@@ -86,6 +96,8 @@ __global__ void dot_product_fp32x4_kernel(float *a, float *b, float *c, int N) {
     }
 }
 
+// FP16x2：先在 half2 中乘法，再将乘积转为 float2 后累加；乘法已经经历半精度舍入。
+// 长度需为偶数且 half2 地址按 4 字节对齐。
 template <const int block_size = 256>
 __global__ void dot_product_fp16x2_kernel(half *a, half *b, float *c, int N) {
     int tid = threadIdx.x;
@@ -119,6 +131,8 @@ __global__ void dot_product_fp16x2_kernel(half *a, half *b, float *c, int N) {
     }
 }
 
+// FP16x8：每轮搬运八个 half，分成四组 half2 计算，再用 FP32 累加。
+// 长度需为 8 的倍数，128 位读写地址按 16 字节对齐；没有逐元素尾部路径。
 template <const int block_size = 256>
 __global__ void dot_product_fp16x8_packed_kernel(half *a, half *b, float *c, int N) {
     int tid = threadIdx.x;
@@ -158,8 +172,11 @@ __global__ void dot_product_fp16x8_packed_kernel(half *a, half *b, float *c, int
 
 struct Generic {};
 
+// 这里只检查 CUDA 与连续性，不验证 b 的长度、dtype、设备是否与 a 一致。
 #define CHECK_T(x) TORCH_CHECK(x.is_cuda() && x.is_contiguous(), #x " must be contiguous CUDA tensor")
 
+// 先申请并清零一个 FP32 输出，供所有块 atomicAdd；返回时再转回输入 dtype。
+// 网格大小来自元素数/每线程组大小，使用 int 保存尺寸；空输入与超大输入需另行处理。
 #define binding_func_gen(name, num, element_dtype)                                                                     \
     torch::Tensor name(torch::Tensor a, torch::Tensor b) {                                                             \
         CHECK_T(a);                                                                                                    \
@@ -199,7 +216,7 @@ binding_func_gen(dot_product_fp32x4, 4, float);
 binding_func_gen(dot_product_fp16x2, 2, half);
 binding_func_gen(dot_product_fp16x8_packed, 8, half);
 
-// binding
+// 将 C++ 包装函数注册为同名 Python 扩展入口。
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     torch_pybinding_func(dot_product);

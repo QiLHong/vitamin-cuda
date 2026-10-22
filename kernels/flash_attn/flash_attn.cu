@@ -1,3 +1,14 @@
+/*
+ * 中文导读：面向仓库所述 SM120 的因果注意力示例，入口固定 HEAD_DIM=128。
+ * Q/O 布局为 [batch, q_len, q_head, 128]，K/V 为 [batch, kv_len, kv_head, 128]。
+ * 一个线程块处理一个 batch、一个 Q 头的 64 个查询位置；四个线程束各负责 16 行。
+ * 当前绑定把所有指针解释为 BF16，QK/PV 使用 BF16 矩阵乘加、FP32 累加。
+ * CHECK_T 只检查 CUDA 与连续性；dtype、形状匹配、同设备、头数整除等并未完整验证。
+ * 因果判断直接比较 Q/K 的位置编号，没有另加 KV 缓存位置偏移；不能直接当作通用解码接口。
+ * 原测试采用 q_len=kv_len；末 KV 分块没有独立有效长度掩码。
+ * q_len>kv_len 且 kv_len 非 64 的倍数时，无效键可能参与 softmax；TMA 越界填充不能替代掩码。
+ * 本次只补中文说明，保留算法与 PTX；未进行 CUDA 编译、GPU 正确性或性能验证。
+ */
 #include <cstdio>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -16,8 +27,8 @@
 
 #define SWIZZLE_128B_TMA(row, col) ((col) ^ (((row) & 0x7) << 3))
 
-// ---------------- Inline PTX assembly macros ----------------
-// cp.async: async 16-byte copy from gmem (src) to smem (dst_smem_32b)
+// ---------------- 内联 PTX 汇编宏 ----------------
+// cp.async：将全局内存（src）中的 16 字节异步拷贝到共享内存（dst_smem_32b）。
 #define CP_ASYNC_CG(dst_smem_32b, src_global_ptr)                                                                      \
     asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n" ::"r"(dst_smem_32b), "l"(src_global_ptr))
 
@@ -35,7 +46,7 @@ __device__ __forceinline__ void cp_async_wait_group() {
         asm volatile("cp.async.wait_group 3;\n" ::);
 }
 
-// ldmatrix
+// ldmatrix：按矩阵片段的线程分配方式从共享内存加载数据。
 #define LDMATRIX_X4(R0, R1, R2, R3, PTR)                                                                               \
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"                                    \
                  : "=r"(R0), "=r"(R1), "=r"(R2), "=r"(R3)                                                              \
@@ -44,11 +55,11 @@ __device__ __forceinline__ void cp_async_wait_group() {
 #define LDMATRIX_X2(R0, R1, PTR)                                                                                       \
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];" : "=r"(R0), "=r"(R1) : "r"(PTR))
 
-// Load two 8x8 tiles and transpose
+// 加载两个 8×8 分块，并使用转置形式的矩阵片段布局。
 #define LDMATRIX_X2_TRANS(R0, R1, PTR)                                                                                 \
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];" : "=r"(R0), "=r"(R1) : "r"(PTR))
 
-// mma.sync
+// mma.sync：线程束协同执行矩阵乘加；下面的累加器使用 FP32。
 #define M16N8K16_F16(C0, C1, C2, C3, A0, A1, A2, A3, B0, B1)                                                           \
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "                                                  \
                  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"                                         \
@@ -61,34 +72,35 @@ __device__ __forceinline__ void cp_async_wait_group() {
                  : "=f"(C0), "=f"(C1), "=f"(C2), "=f"(C3)                                                              \
                  : "r"(A0), "r"(A1), "r"(A2), "r"(A3), "r"(B0), "r"(B1), "f"(C0), "f"(C1), "f"(C2), "f"(C3))
 
-// ---------------- MBarrier & TMA (pure PTX helpers) ----------------
+// ---------------- MBarrier 与 TMA（直接使用 PTX 的辅助函数）----------------
 
-// MBarrier object (8-byte aligned per hardware)
+// mbarrier 对象：使用的共享内存地址须满足 8 字节对齐。
 typedef uint64_t mbarrier_t;
 
-// Init barrier (single thread in prologue)
+// 初始化屏障：在核函数的准备阶段由单个线程调用。
 __device__ __forceinline__ void mbarrier_init(mbarrier_t *mbar, uint32_t expected_count) {
     asm volatile("mbarrier.init.shared.b64 [%0], %1;\n" ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(mbar))),
                  "r"(expected_count));
 }
 
-// Expected byte count for the TMA transfer
+// 为本阶段登记 TMA 传输的预期字节数，同时执行 arrive 操作。
 __device__ __forceinline__ void mbarrier_expect_tx(mbarrier_t *mbar, uint32_t tx_bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;\n" ::"r"(
                      static_cast<uint32_t>(__cvta_generic_to_shared(mbar))),
                  "r"(tx_bytes));
 }
 
-// Consumer-side arrive (flip phase) after draining smem — unused here: no producer/consumer warp specialied
-// warp 0 issues loads while all warps consume; __syncthreads() is enough for our pattern.
+// 消费者读完共享内存后执行 arrive 的辅助函数；当前未使用，也未划分生产者/消费者线程束。
+// 当前由线程 0 发起加载，所有线程束参与计算；主循环另用 __syncthreads() 协调缓冲区复用。
 __device__ __forceinline__ void mbarrier_arrive(mbarrier_t *mbar) {
     asm volatile("mbarrier.arrive.shared.b64 _, [%0];\n" ::"r"(static_cast<uint32_t>(__cvta_generic_to_shared(mbar))));
 }
 
-// Wait until the TMA copy completes
+// 等待对应阶段的 TMA 拷贝完成。
 __device__ __forceinline__ void mbarrier_wait(uint64_t *smem_ptr, uint32_t phase) {
     uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-    // Large spin timeout (0x989680 == 10,000,000 cycles)
+    // 等待提示值为 0x989680，即 10,000,000 纳秒；原注释的 cycles 单位有误。
+    // PTX 的 timeHint 只是单次等待提示；下面的分支会反复尝试，直到屏障阶段完成。
     uint32_t ticks = 0x989680;
 
     asm volatile("{\n\t"
@@ -104,7 +116,7 @@ __device__ __forceinline__ void mbarrier_wait(uint64_t *smem_ptr, uint32_t phase
                  : "memory");
 }
 
-// CTA 4D TMA: global -> shared
+// CTA 内的四维 TMA 拷贝：全局内存 -> 共享内存。
 __device__ __forceinline__ void cp_async_bulk_tensor_4d(
     mbarrier_t *mbar, const void *tmap, const void *smem_ptr, int32_t s_0, int32_t s_1, int32_t s_2, int32_t s_3) {
     uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
@@ -121,6 +133,8 @@ __device__ __forceinline__ void cp_async_bulk_tensor_4d(
                  : "memory");
 }
 
+// Q 的 128 维分成两个 64 维区域；每轮 k_step 对应 16 个归约维元素。
+// SWIZZLE_128B_TMA 必须与 tensor map 的共享内存重排方式配合，不能当作普通行主序地址。
 template <const int BM, const int HEAD_DIM, typename T>
 __device__ __forceinline__ void
 ldmatrix_Qs(uint32_t reg_q[8][4], T (*Qs)[BM][HEAD_DIM / 2], int warp_row_offset, int lane_id) {
@@ -168,6 +182,7 @@ __device__ __forceinline__ void ldmatrix_Vs(uint32_t reg_v[16][2], T (*Vs)[BN][H
     }
 }
 
+// 将两个 FP32 值舍入为 BF16 后按位打包进一个 32 位寄存器，供后续 MMA 使用。
 __device__ __forceinline__ uint32_t pack_bfloat2(float2 x) {
     union {
         __nv_bfloat162 bf16x2;
@@ -252,6 +267,8 @@ __device__ __forceinline__ void epilogue_writeback(float acc_o[16][4],
     }
 }
 
+// 把延迟积累的行缩放同时施加到分子 acc_o 和分母 d_i；二者比值保持不变。
+// row_scale 随后恢复为 1，避免对每个 KV 分块都遍历全部输出寄存器做缩放。
 __device__ __forceinline__ void lazy_rescale(float acc_o[16][4], float d_i[2], float row_scale[2], int row_idx) {
     if (row_scale[row_idx] == 1.0f) {
         return;
@@ -267,7 +284,7 @@ __device__ __forceinline__ void lazy_rescale(float acc_o[16][4], float d_i[2], f
     row_scale[row_idx] = 1.0f;
 }
 
-// tma copy implement softmax(q @ k.T*scale) @ v
+// 使用 TMA 搬运数据，实现带因果掩码的 softmax(q @ k.T * scale) @ v。
 template <const int BM = 64, const int BN = 64, const int HEAD_DIM = 128, const int THREADS_PER_BLOCK = 128, typename T>
 __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
                                 const __grid_constant__ CUtensorMap tma_k,
@@ -278,25 +295,25 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
                                 int q_head,
                                 int kv_head,
                                 float scale) {
-    // 1. 48KB smem + 3 mbarriers
+    // 1. 默认分块使用 48 KiB 共享内存保存 Q/K/V，另加三个 mbarrier。
     extern __shared__ __align__(128) uint8_t smem_buf[];
-    T(*Qs)[BM][HEAD_DIM / 2] = reinterpret_cast<T(*)[BM][HEAD_DIM / 2]>(smem_buf); // BM*HEAD_DIM
+    T(*Qs)[BM][HEAD_DIM / 2] = reinterpret_cast<T(*)[BM][HEAD_DIM / 2]>(smem_buf); // 共 BM*HEAD_DIM 个元素。
     T(*Ks)
-    [BN][HEAD_DIM / 2] = reinterpret_cast<T(*)[BN][HEAD_DIM / 2]>(smem_buf + BM * HEAD_DIM * sizeof(T)); // BN*HEAD_DIM
+    [BN][HEAD_DIM / 2] = reinterpret_cast<T(*)[BN][HEAD_DIM / 2]>(smem_buf + BM * HEAD_DIM * sizeof(T)); // 共 BN*HEAD_DIM 个元素。
     T(*Vs)
     [BN][HEAD_DIM / 2] =
-        reinterpret_cast<T(*)[BN][HEAD_DIM / 2]>(smem_buf + (BM + BN) * HEAD_DIM * sizeof(T)); // BN*HEAD_DIM
+        reinterpret_cast<T(*)[BN][HEAD_DIM / 2]>(smem_buf + (BM + BN) * HEAD_DIM * sizeof(T)); // 共 BN*HEAD_DIM 个元素。
     T(*Os)
     [HEAD_DIM] =
-        reinterpret_cast<T(*)[HEAD_DIM]>(smem_buf); // 16KB, reused at the end for writing back to global memory
+        reinterpret_cast<T(*)[HEAD_DIM]>(smem_buf); // 默认 16 KiB；最后复用 Q 的缓冲区，整理输出后写回全局内存。
 
-    // mbar array at end of SMEM (8-byte aligned;
+    // mbarrier 放在共享内存数据区末尾，地址按 8 字节对齐。
     mbarrier_t *mbar_q = reinterpret_cast<mbarrier_t *>(smem_buf + (BM + BN * 2) * HEAD_DIM * sizeof(T));
     mbarrier_t *mbar_k =
         reinterpret_cast<mbarrier_t *>(smem_buf + (BM + BN * 2) * HEAD_DIM * sizeof(T) + sizeof(mbarrier_t));
     mbarrier_t *mbar_v = mbar_k + 1;
 
-    // 2. coordinates
+    // 2. 计算线程、分块与注意力头的坐标。
     const int tid = threadIdx.x;
     const int q_tile_idx = blockIdx.x;
     const int batch_id = blockIdx.y;
@@ -312,41 +329,41 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
         mbarrier_init(mbar_v, 1);
 
         mbarrier_expect_tx(mbar_q, BM * HEAD_DIM * sizeof(T));
-        // 2 TMA instructions to load the 128-dim split into left and right halves
+        // 把 128 维拆成左右各 64 维，用两条 TMA 指令加载。
         cp_async_bulk_tensor_4d(mbar_q, &tma_q, Qs[0], 0, head_id, q_start_idx, batch_id);
         cp_async_bulk_tensor_4d(mbar_q, &tma_q, Qs[1], 64, head_id, q_start_idx, batch_id);
     }
     __syncthreads();
-    mbarrier_wait(mbar_q, 0); // Wait for Q to finish loading (Q is used throughout the inner loop)
+    mbarrier_wait(mbar_q, 0); // 等待 Q 加载完成；整个 KV 内循环都会复用它。
 
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
     const int warp_row_offset = warp_id * 16;
 
-    // 4. ldmatrix q
+    // 4. 用 ldmatrix 将 Q 的矩阵片段装入寄存器。
     uint32_t reg_q[8][4];
     ldmatrix_Qs<BM, HEAD_DIM>(reg_q, Qs, warp_row_offset, lane_id);
 
-    // 5. Initialize output registers
+    // 5. 初始化保存输出累加值的寄存器。
     float acc_o[16][4] = {0.0f};
 
-    // m_i and d_i track max value and softmax denominator for each of the two rows per thread
+    // 每个线程参与两行计算；m_i 跟踪各行最大值，d_i 跟踪当前缩放坐标系下的 softmax 分母。
     float m_i[2] = {-FLT_MAX, -FLT_MAX};
     float d_i[2] = {0.0f, 0.0f};
     float row_scale[2] = {1.0f, 1.0f};
 
-    const int k_end = min(kv_len, q_start_idx + BM); // causal mask boundary, upper triangle is all zeros so skip
+    const int k_end = min(kv_len, q_start_idx + BM); // 因果边界：不读取整个 Q 分块都不允许关注的后续 K 分块。
     int phase_k = 0;
     int phase_v = 0;
-    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)
-    // P is written out in BF16, so avoid letting the deferred renorm grow beyond
-    // roughly one BF16 mantissa's worth of amplification (2^8). Once row_scale
-    // drops below 2^-8, materialize it back into acc_o/d_i before quantizing P.
+    const float scale_log2 = scale * 1.44269504f; // scale*log2(e)，使 exp2f 对应以 e 为底的指数。
+    // P 的矩阵乘加输入会量化为 BF16，因此限制延迟重缩放产生的放大程度。
+    // 此处阈值对应约 2^8 的放大；当 row_scale
+    // 小于 2^-8 时，先把缩放落实到 acc_o/d_i，再量化 P。
     constexpr float lazy_scale_threshold = 0x1p-8f;
 
-    // 6. kv loop
+    // 6. 按分块遍历 K/V。
     for (int n = 0; n < k_end; n += BN) {
-        // --- 6.1 TMA async load KV ---
+        // --- 6.1 使用 TMA 异步加载 K/V ---
         if (tid == 0) {
             mbarrier_expect_tx(mbar_k, BN * HEAD_DIM * sizeof(T));
             mbarrier_expect_tx(mbar_v, BN * HEAD_DIM * sizeof(T));
@@ -357,9 +374,9 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
         }
         __syncthreads();
         mbarrier_wait(mbar_k, phase_k);
-        phase_k ^= 1; // flip phase
+        phase_k ^= 1; // 翻转待等待阶段的奇偶标记。
 
-        // --- 6.2 Compute S = Q * K^T ---
+        // --- 6.2 计算注意力分数 S = Q * K^T ---
         float acc_s[8][4] = {0.f};
 
 #pragma unroll
@@ -369,7 +386,7 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
             mma_compute<8>(acc_s, reg_q[k_step], reg_k);
         }
 
-        // --- 6.3 Online Softmax (Max & Correction) ---
+        // --- 6.3 在线 softmax：更新最大值并修正旧累加值的缩放 ---
         int row_0 = warp_row_offset + (lane_id / 4);
         int row_1 = row_0 + 8;
 
@@ -423,7 +440,7 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
         float inv_row_scale_0 = __frcp_rn(row_scale[0]);
         float inv_row_scale_1 = __frcp_rn(row_scale[1]);
 
-        // 6.4 Normalize P in registers and accumulate local denominator
+        // 6.4 在寄存器中生成当前缩放坐标系下的 P，并累加局部分母；最终除法在写回时进行。
 #pragma unroll
         for (int n_step = 0; n_step < 8; ++n_step) {
             float e_0_0 = exp2f(fmaf(acc_s[n_step][0], scale_log2, -m_i[0]));
@@ -447,7 +464,7 @@ __global__ void fmha_tma_kernel(const __grid_constant__ CUtensorMap tma_q,
         d_i[0] += local_d[0];
         d_i[1] += local_d[1];
 
-        // --- 6.5 O = P * V ---
+        // --- 6.5 累加 O = P * V ---
         mbarrier_wait(mbar_v, phase_v);
         phase_v ^= 1;
 #pragma unroll
@@ -480,30 +497,30 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
                                         uint64_t dim_b,
                                         uint64_t stride_h,
                                         uint64_t stride_s,
-                                        uint64_t stride_b, // Byte stride
+                                        uint64_t stride_b, // 以字节为单位的步长。
                                         uint32_t box_d,
-                                        uint32_t box_s) // Each kernel load takes a (box_s x box_d) block
+                                        uint32_t box_s) // 每次加载一个 box_s × box_d 的数据分块。
 {
     CUtensorMap tmap;
     CUtensorMapDataType type =
         std::is_same_v<T, __half> ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16 : CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
     CUtensorMapSwizzle swizzle = rowBytes == 128 ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_64B;
 
-    // TMA dimensions: from fastest (0) to slowest (3)
-    // Assuming memory layout [Batch, Seq, Head, Dim], Dim is fastest
+    // TMA 维度按地址变化从快（0）到慢（3）的顺序排列。
+    // 张量布局为 [Batch, Seq, Head, Dim]，最内层 Dim 连续。
     uint64_t globalDim[4] = {dim_d, dim_h, dim_s, dim_b};
 
-    // globalStrides are strides for dimensions 1, 2, 3, must be in Bytes
+    // globalStrides 给出维度 1、2、3 的步长，单位必须是字节。
     uint64_t globalStrides[3] = {stride_h, stride_s, stride_b};
 
-    // boxDim is the size we load at once for each dimension
-    // For Head and Batch dimensions, we only load one at a time (hence 1)
+    // boxDim 指定一次加载在各维度上的范围。
+    // Head 和 Batch 每次各取一个，因此对应大小为 1。
     uint32_t boxDim[4] = {box_d, 1, box_s, 1};
     uint32_t elementStrides[4] = {1, 1, 1, 1};
 
     CUresult res = cuTensorMapEncodeTiled(&tmap,
                                           type,
-                                          4, // Rank = 4
+                                          4, // 张量维数为 4。
                                           global_address,
                                           globalDim,
                                           globalStrides,
@@ -518,6 +535,9 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
     return tmap;
 }
 
+// 绑定只固定 head_dim；调用方还须保证 BF16、Q/K/V/O 形状与同设备关系正确。
+// q_head/kv_head 在核内直接用于分组，要求 kv_head>0 且 q_head 能被 kv_head 整除。
+// 完整输出布局按连续 [batch,q_len,q_head,128] 计算，不能用任意 strides 的输出替代。
 #define binding_tiled_tma_func_gen(name, HEAD_DIM)                                                                     \
     void name##_##HEAD_DIM(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor o, float scale) {          \
                                                                                                                        \
@@ -526,7 +546,7 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
         CHECK_T(v);                                                                                                    \
         CHECK_T(o);                                                                                                    \
                                                                                                                        \
-        /* Extract dimension info dynamically from Tensor */                                                           \
+        /* 从 Tensor 动态读取各维度大小。 */                                                           \
         const int batch_size = q.size(0);                                                                              \
         const int q_len = q.size(1);                                                                                   \
         const int q_head = q.size(2);                                                                                  \
@@ -534,10 +554,10 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
         const int kv_len = k.size(1);                                                                                  \
         const int kv_head = k.size(2);                                                                                 \
                                                                                                                        \
-        /* Only validate that head_dim matches the compile-time constant */                                            \
+        /* 此处只检查 head_dim 是否等于编译期常量。 */                                            \
         TORCH_CHECK(head_dim == HEAD_DIM, "Head dim mismatch: expected ", HEAD_DIM);                                   \
                                                                                                                        \
-        /* Extract byte strides dynamically (TMA requires byte counts) */                                              \
+        /* 从张量步长计算字节步长；TMA 接口以字节计数。 */                                              \
         int elem_bytes = q.element_size();                                                                             \
         uint64_t q_stride_h = q.stride(2) * elem_bytes;                                                                \
         uint64_t q_stride_s = q.stride(1) * elem_bytes;                                                                \
@@ -587,7 +607,7 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
                                                                 head_dim / 2,                                          \
                                                                 BN);                                                   \
                                                                                                                        \
-        /* q_seq on x-dimension to reuse L2 cache for KV tiles */                                                      \
+        /* 将 Q 序列分块映射到网格 x 维，意在复用 L2 中的 KV 分块。 */                                                      \
         const dim3 blocks_per_grid((q_len + BM - 1) / BM, batch_size, q_head);                                         \
         const int THREADS_PER_BLOCK = 128;                                                                             \
         cudaStream_t stream = at::cuda::getCurrentCUDAStream();                                                        \
@@ -595,7 +615,7 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
         cudaFuncSetAttribute(name##_kernel<BM, BN, HEAD_DIM, THREADS_PER_BLOCK, __nv_bfloat16>,                        \
                              cudaFuncAttributeMaxDynamicSharedMemorySize,                                              \
                              smem_size);                                                                               \
-        /* launch kernel */                                                                                            \
+        /* 在当前 CUDA 流上启动核函数。 */                                                                                            \
         name##_kernel<BM, BN, HEAD_DIM, THREADS_PER_BLOCK, __nv_bfloat16>                                              \
             <<<blocks_per_grid, THREADS_PER_BLOCK, smem_size, stream>>>(                                               \
                 tma_q,                                                                                                 \
@@ -612,6 +632,6 @@ inline CUtensorMap create_4d_tensor_map(T *global_address,
 binding_tiled_tma_func_gen(fmha_tma, 128);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // fmha_tma_128
+    // 导出 head_dim=128 的 fmha_tma_128 入口。
     torch_pybinding_func(fmha_tma_128);
 }

@@ -1,25 +1,49 @@
-# Transpose
+# 矩阵转置（Transpose）
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-Matrix transpose kernels
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
 
-- [x] `transpose_coalesced_read` — coalesced global loads (input-centric)
-- [x] `transpose_coalesced_write` — coalesced global stores (output-centric)
-- [x] `transpose_smem` — shared-memory tiled transpose
-- [x] `transpose_smem_bcf` — SMEM bank-conflict-free (padding)
-- [x] `transpose_smem_packed_bcf` — SMEM bank-conflict-free, `float4` vectorized r/w
-- [x] `transpose_smem_swizzled_packed` — SMEM swizzled, `float4` vectorized r/w
-- [x] PyTorch op binding & correctness check
+## 概述
 
-## Build & Test
+矩阵转置核函数。
+
+- [x] `transpose_coalesced_read` — 全局内存合并读取（以输入布局为中心）
+- [x] `transpose_coalesced_write` — 全局内存合并写入（以输出布局为中心）
+- [x] `transpose_smem` — 借助共享内存的分块转置
+- [x] `transpose_smem_bcf` — 通过填充消除相应访问模式的共享内存 Bank 冲突
+- [x] `transpose_smem_packed_bcf` — 共享内存填充与 `float4` 向量化读写
+- [x] `transpose_smem_swizzled_packed` — 共享内存重排与 `float4` 向量化读写
+- [x] PyTorch 算子绑定与正确性检查
+
+## 中文导读与适用范围
+
+输入是连续 FP32 矩阵 `[height, width]`，输出应为连续 FP32 矩阵 `[width, height]`，计算 `b[x, y] = a[y, x]`。基础版本分别让输入读取或输出写入连续；共享内存版本以 `32×32` 分块，通过 `32×8` 个线程读入小块、块内同步，再交换读出方向。
+
+`transpose_smem_bcf` 在共享内存每行增加一列填充，改变转置读取时的 Bank 映射。重排版本使用列索引与行索引的异或，并在读回时应用对应映射。它们说明的是该实现中的访问模式，性能仍依赖硬件与输入形状。
+
+| 版本 | 边缘处理 |
+| --- | --- |
+| 两个基础版本 | 对单个元素检查输入或输出坐标 |
+| `transpose_smem`、`transpose_smem_bcf` | 完整块走快速分支，边缘块逐元素检查 |
+| 两个 packed 版本 | 只检查 `float4` 的起始坐标；行高和行宽应为 4 的正整数倍，并满足 16 字节地址对齐 |
+
+输出形状、设备一致性和输入输出不得有有害重叠，均需调用方保证；这些包装并未检查全部条件。打包版本不能仅凭存在边界 `if` 就视为支持任意矩阵大小。
+
+`run_ncu.sh` 原命令引用 `test_.py`，当前目录实际只有 `test.py`；本次保留原脚本命令并在脚本内注明此差异。需要采集时应先核对真实入口和 Nsight Compute 环境，不能把该脚本当成已通过的运行记录。
+
+## 构建与测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Benchmark Results
+### 历史基准测试结果
+
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
 
 ```bash
 ####################################################################################################

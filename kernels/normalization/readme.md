@@ -1,27 +1,45 @@
-# norm 1d
+# norm 1d：一维归一化
 
-## Overview
+[英文原文](./readme.en.md) · [中文入门教程](../../docs/zh-CN/入门教程.md) · [术语表](../../docs/zh-CN/术语表.md)
 
-norm kernels calculate y = (x - mean) / std
+> 本页保留原功能清单和历史输出；功能勾选不表示本次已运行验证。
 
-- [x] naive Torch norm
+## 概述
+
+归一化核函数计算 y = (x - mean) / std，其中 mean 为行均值，std 为行标准差。
+
+- [x] 朴素 Torch 归一化基准
 - [x] norm — FP32
 - [x] norm — FP32x4
 - [x] norm — FP16
-- [x] norm — FP16x8 packed
-- [x] norm — FP32x4 split-k
-- [x] pytorch op bindings && diff check
+- [x] norm — FP16x8，打包读写
+- [x] norm — FP32x4，按行内分块拆分计算（split-k）
+- [x] PyTorch 算子绑定与结果差异检查
 
-## Run tests
+## 中文导读与适用范围
+
+输入输出按连续二维张量 `[bs, n]` 解释，每一行独立计算 `mean = sum(x) / n`、`std = sqrt(sum(x*x) / n - mean*mean)`，再写出 `(x-mean)/std`。这里使用总体方差，Python 对照设置 `unbiased=False`。这不是包含可学习缩放和偏置的完整 LayerNorm 接口。
+
+普通版本一个线程块处理一行，先汇总一阶和二阶统计量，再读取输入完成归一化。FP16 输入转换为 FP32 进行统计和归一化计算，写出时舍入回 FP16。split-k 版本把一行拆给多个线程块：第一轮写部分和及平方和，第二轮合并整行统计并写出当前分块；两个核函数在同一 CUDA 流中顺序执行。
+
+FP32/FP16 标量版本逐元素判断范围。FP32x4（包括 split-k）要求行长为 4 的正整数倍，FP16x8 打包版本要求行长为 8 的正整数倍，并保证 16 字节地址对齐；只检查组起点不能保护任意尾部。包装仅检查 CUDA 与连续性，未核对 dtype、二维形状、输出容量及设备一致性。
+
+原实现没有在标准差中加入 epsilon，也没有把舍入误差造成的负方差截断为零。常量行可能除零，`E[x²]-E[x]²` 也可能有消减误差；文档与注释保留这些事实，没有改变公式。当前 `test.py` 默认只调用 `test()`，`test_split_k()` 调用仍被注释掉；下方 split-k 日志是原仓库历史记录。
+
+## 运行测试
+
+需要可用的 NVIDIA GPU、匹配的 CUDA/PyTorch 编译环境，以及脚本导入的 NumPy、FlashInfer 等依赖。在当前模块目录执行下列命令；本次未进行 CUDA 编译、GPU 正确性或性能测试。
 
 ```bash
 export TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)
 python test.py
 ```
 
-### Sample output
+### 历史示例输出
 
-#### test split k
+以下为原仓库保留的记录（含原英文日志和数值），不是本次翻译产生的运行结果。Python 计时统计实际使用中位数 `np.median`，原日志标签 `mean time` 保留不变。
+
+#### split-k 版本测试
 
 ```bash
 ####################################################################################################
@@ -98,7 +116,7 @@ norm_fp32x4                    mean time: 0.050576 ms, speedup: 1.57
 norm_fp32x4_split_k            mean time: 0.041776 ms, speedup: 1.90
 ```
 
-#### test all
+#### 全部版本测试
 
 ```bash
 ####################################################################################################

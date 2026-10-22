@@ -1,3 +1,6 @@
+# 中文导读：比较根据 INT32 索引从嵌入表读取向量的结果。
+# 测试尺寸均适合 x4/x8 分组，未覆盖非法索引、INT64 索引或不足一组的嵌入维度。
+# 本次只翻译和补充注释，未执行 CUDA 编译、GPU 正确性或性能测试。
 import numpy as np
 from functools import partial
 from pathlib import Path
@@ -11,7 +14,7 @@ torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
 current_dir = Path(__file__).parent.resolve()
-# Load the CUDA kernel as a python module
+# 即时编译 CUDA 源文件并加载为 Python 扩展；首次执行需要可用的 CUDA 编译环境。
 lib = load(
     name="embedding_lib",
     sources=[str(current_dir / "embedding.cu")],
@@ -33,6 +36,7 @@ lib = load(
 def benchmark(op, a, b, c=None, warmup=10, rep=100, prefix="torch"):
     input_args = (a, b, c) if c is not None else (a, b)
 
+    # 使用原设置预热、重复计时并启用 cold_l2_cache；不在本次翻译中改变测量条件。
     times = bench_gpu_time(
         fn=op,
         input_args=input_args,
@@ -42,6 +46,7 @@ def benchmark(op, a, b, c=None, warmup=10, rep=100, prefix="torch"):
         use_cuda_graph=False,
         cold_l2_cache=True,
     )
+    # 实际统计量是中位数；输出中的英文 mean time 标签按原样保留。
     avg_duration = float(np.median(times))
 
     if prefix == "torch":
@@ -62,7 +67,7 @@ def diff_check(a, b, prefix="torch", eps=1e-5):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行原有测试尺寸与基准流程。
     device = torch.device("cuda")
     # 涵盖了 搜广推特征工程 到 llm 级别的 embedding 大小和特征长度
     emd_sizes = [32, 128, 1024, 102400]
@@ -90,7 +95,7 @@ if __name__ == "__main__":
             out = F.embedding(emd_idx, weight=weight)
             diff_check(out, out_my, prefix="embedding_fp32x4_packed")
 
-            ################### half
+            ################### 半精度（FP16）
             emd_idx = emd_idx
             weight = weight.half()
             benchmark(F.embedding, emd_idx, weight)

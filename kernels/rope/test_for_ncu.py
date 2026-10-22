@@ -1,3 +1,7 @@
+# 中文阅读提示：此脚本会即时编译 CUDA 扩展；下面是原有测试配置，本次未执行 GPU 测试。
+# 本入口供 Nsight Compute 采集使用；分析器运行会改变计时条件，不能直接与普通计时混用。
+# 当前正余弦缓存只预建 head_dim=128/256、位置 0..8191；更大位置或其他维度需另行设计。
+# rope() 中现算的 cos/sin 随后被全局缓存覆盖，这是原实现的行为。
 import time
 from functools import partial
 from typing import Optional
@@ -8,7 +12,7 @@ from torch.utils.cpp_extension import load
 torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
-# Load the CUDA kernel as a python module
+# 将 CUDA 源码即时编译并加载为 Python 扩展模块。
 lib = load(
     name="rope_lib",
     sources=["rope_neox.cu"],
@@ -63,11 +67,11 @@ def apply_rotary_pos_emb(q, cos, sin):
     q_embed = (q * cos) + (rotate_half(q) * sin)
     return q_embed
 #@torch.compile()
-def rope_with_sin_cos_cache(q):  # q shape: [bs, seqlen, head_dim]
+def rope_with_sin_cos_cache(q):  # q 的形状：[bs, seqlen, head_dim]。
     # inv_freq = compute_default_rope_parameters(q.shape[-1])
     # position_ids = torch.arange(q.shape[1], device=q.device).float()
 
-    # # [seq_len] outer [dim/2] -> [seq_len, dim/2]
+    # # 位置与逆频率做外积：[seq_len] × [dim/2] -> [seq_len, dim/2]。
     # freqs = torch.outer(position_ids, inv_freq)
 
     # # [seq_len, dim/2] -> [seq_len, dim]
@@ -79,13 +83,13 @@ def rope_with_sin_cos_cache(q):  # q shape: [bs, seqlen, head_dim]
 
     return apply_rotary_pos_emb(q, cos, sin)
 
-# neo-x stype rope, single head single batch
+# NeoX 风格的 RoPE；当前函数处理 [bs, seqlen, head_dim]，原注释的“单 batch”描述不准确。
 #@torch.compile()
-def rope(q):  # q shape: [bs, seqlen, head_dim]
+def rope(q):  # q 的形状：[bs, seqlen, head_dim]。
     inv_freq = compute_default_rope_parameters(q.shape[-1])
     position_ids = torch.arange(q.shape[1], device=q.device).float()
 
-    # [seq_len] outer [dim/2] -> [seq_len, dim/2]
+    # 位置与逆频率做外积：[seq_len] × [dim/2] -> [seq_len, dim/2]。
     freqs = torch.outer(position_ids, inv_freq)
 
     # [seq_len, dim/2] -> [seq_len, dim]
@@ -100,7 +104,7 @@ def rope(q):  # q shape: [bs, seqlen, head_dim]
 
 def benchmark(op, a, b=None, warmup=0, rep=1, prefix="torch"):
     if b is not None:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             res = op(a, b)
         torch.cuda.synchronize()
@@ -110,7 +114,7 @@ def benchmark(op, a, b=None, warmup=0, rep=1, prefix="torch"):
         torch.cuda.synchronize()
         print(f"{prefix:30s} mean time: {(time.perf_counter() - start) / rep * 1000:.6f} ms")
     else:
-        # warm up
+        # 预热，减少首次运行对正式计时的影响。
         for i in range(warmup):
             res = op(a)
         torch.cuda.synchronize()
@@ -128,7 +132,7 @@ def diff_check(a, b, prefix="torch", eps=1e-4):
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 运行下面列出的核函数测试配置。
     device = torch.device("cuda")
 
     torch.manual_seed(42)

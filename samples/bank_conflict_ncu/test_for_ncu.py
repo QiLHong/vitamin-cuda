@@ -8,7 +8,7 @@ from torch.utils.cpp_extension import load
 torch.set_grad_enabled(False)
 
 common_flags = ["-O3", "-std=c++17"]
-# Load the CUDA kernel as a python module
+# 从当前目录即时编译 CUDA 扩展；应先切换到本示例目录。
 lib = load(
     name="load_lib",
     sources=["test.cu"],
@@ -28,7 +28,7 @@ lib = load(
 
 
 if __name__ == "__main__":
-    # test the kernel
+    # 原脚本只启动不同规模的核函数，没有结果断言；主要供 NCU 收集计数器。
     for sz in [512, 512*128, 512*128*128, 512*512*512]:
         a = torch.randn(sz).float().cuda()
         b = torch.zeros_like(a)
